@@ -326,41 +326,37 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, ModelC
 
     [McpServerTool(Name = "gemini_list_models", Title = "List Gemini models", ReadOnly = true, Idempotent = true, OpenWorld = true)]
     [Description("""
-        현재 API 키로 사용 가능한 Gemini 모델을 용도(category: text, pro, image, tts, video)별로 보여주고,
-        각 용도에 지금 선택된 모델을 표시합니다. 모델을 바꾸려면 이 목록에서 고른 이름으로 gemini_select_model 을 호출하세요.
+        현재 API 키로 사용 가능한 Gemini 모델을 용도(category: text, pro, image, tts, video)별로 최신순으로 보여주고,
+        각 용도에 지금 선택된 모델(★)과, 선택/기본 모델이 목록에 없을 때의 경고(⚠)와 추천 후보를 표시합니다.
+        모델을 바꾸려면 이 목록에서 고른 이름으로 gemini_select_model 을 호출하세요.
+        목록은 1시간 캐시되며 refresh=true 로 즉시 새로 받아올 수 있습니다.
         """)]
     public async Task<string> ListModelsAsync(
         [Description("이 용도의 모델만 표시: text, pro, image, tts, video")] string? category = null,
-        [Description("모델 이름에 포함될 문자열 (예: '3.1', 'preview')")] string? filter = null,
-        [Description("true 면 어떤 용도에도 해당하지 않는 모델(임베딩 등)도 표시")] bool include_other = false,
+        [Description("모델 이름에 포함될 문자열 (예: '3.8', 'preview')")] string? filter = null,
+        [Description("true 면 용도에 해당하지 않는 모델(음악, 에이전트, 임베딩, Live 전용 등)도 표시")] bool include_other = false,
+        [Description("true 면 캐시(1시간)를 무시하고 모델 목록을 새로 받아옴")] bool refresh = false,
         CancellationToken cancellationToken = default)
     {
         var only = string.IsNullOrWhiteSpace(category) ? null : ModelCatalog.NormalizeCategory(category);
-        var list = await gemini.ListModelsAsync(cancellationToken);
-        var sb = new StringBuilder(SelectionTable());
+        var list = await catalog.GetModelsAsync(refresh, cancellationToken);
+        var sb = new StringBuilder(SelectionTable(list));
 
         var groups = new Dictionary<string, List<string>>();
-        foreach (var node in list["models"] as JsonArray ?? new JsonArray())
+        foreach (var m in ModelInfo.Newest(list.Models))
         {
-            if (node is not JsonObject m)
+            if (!string.IsNullOrEmpty(filter) && !m.Name.Contains(filter, StringComparison.OrdinalIgnoreCase))
                 continue;
-            var name = ModelCatalog.StripPrefix(m["name"]?.GetValue<string>() ?? "");
-            if (!string.IsNullOrEmpty(filter) && !name.Contains(filter, StringComparison.OrdinalIgnoreCase))
-                continue;
-            var group = ModelCatalog.Classify(m) ?? "other";
+            var group = m.Category ?? "other";
             // pro 모델은 text 용도로도 쓸 수 있으므로 두 그룹 모두에 보입니다.
             var targets = group == ModelCatalog.Pro ? new[] { ModelCatalog.Pro, ModelCatalog.Text } : [group];
             foreach (var target in targets)
             {
                 if ((only is not null && target != only) || (target == "other" && !include_other))
                     continue;
-                var selected = only is null && target != "other" && catalog.Get(target) == name ? " ★" : "";
-                var title = m["displayName"]?.GetValue<string>();
-                var methods = string.Join(",", (m["supportedGenerationMethods"] as JsonArray ?? new JsonArray()).Select(x => x?.GetValue<string>()));
-                var line = $"- {name}{selected}{(title is null ? "" : $" — {title}")}  in={m["inputTokenLimit"]} out={m["outputTokenLimit"]} [{methods}]";
                 if (!groups.TryGetValue(target, out var lines))
                     groups[target] = lines = [];
-                lines.Add(line);
+                lines.Add(FormatModel(m, target));
             }
         }
 
@@ -375,7 +371,9 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, ModelC
 
         if (groups.Count == 0)
             sb.Append("\n(조건에 맞는 모델이 없습니다)\n");
-        sb.Append("\n★ = 현재 선택. 목록에 없는 모델도 이름을 알면 gemini_select_model 이나 각 도구의 model 인수로 지정할 수 있습니다.\n");
+        var age = DateTimeOffset.UtcNow - list.FetchedAt;
+        sb.Append($"\n★ = 현재 선택, [latest] = 항상 최신 버전을 가리키는 별칭, [preview] = 미리보기(예고 없이 종료될 수 있음).\n");
+        sb.Append($"목록 기준: {list.FetchedAt.ToLocalTime():yyyy-MM-dd HH:mm:ss} ({(int)age.TotalMinutes}분 전 조회, 캐시 {(int)ModelCatalog.ModelListTtl.TotalMinutes}분). 새로 받으려면 refresh=true.\n");
         return sb.ToString();
     }
 
@@ -383,12 +381,12 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, ModelC
     [Description("""
         용도(category)별 기본 모델을 선택합니다. 이후 해당 도구에서 model 인수를 생략하면 이 모델을 씁니다.
         category: text(gemini_ask/web_search/read_urls/analyze_media/run_code 기본), pro(model:'pro' 별칭), image, tts, video.
-        model 은 gemini_list_models 에 나온 이름이며, 'default' 를 주면 내장 기본값으로 되돌립니다.
+        model 은 gemini_list_models 에 나온 이름이며, 'default' 를 주면 내장 기본값으로, 'newest' 를 주면 그 용도의 최신 모델로 정합니다.
         선택은 서버 전역(모든 클라이언트 공통)이고 서버 재시작 후에도 유지됩니다.
         """)]
     public async Task<string> SelectModelAsync(
         [Description("용도: text, pro, image, tts, video")] string category,
-        [Description("모델 이름 (예: gemini-3.1-pro-preview). 'default' 면 기본값으로 초기화")] string model,
+        [Description("모델 이름 (예: gemini-3.1-pro-preview). 'default' = 기본값으로 초기화, 'newest' = 이 용도의 최신 모델")] string model,
         [Description("true 면 모델 목록에 없는 이름이어도 확인 없이 선택")] bool skip_validation = false,
         CancellationToken cancellationToken = default)
     {
@@ -399,41 +397,102 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, ModelC
         if (model.Trim().Equals("default", StringComparison.OrdinalIgnoreCase))
         {
             catalog.Set(key, null);
-            return $"{key} 모델을 기본값({ModelCatalog.Defaults[key]})으로 되돌렸습니다.\n\n{SelectionTable()}";
+            return $"{key} 모델을 기본값({ModelCatalog.Defaults[key]})으로 되돌렸습니다.\n\n{SelectionTable(await TryGetModelsAsync(cancellationToken))}";
+        }
+
+        if (model.Trim().Equals("newest", StringComparison.OrdinalIgnoreCase))
+        {
+            var newest = ModelCatalog.Newest(await catalog.GetModelsAsync(refresh: true, cancellationToken), key)
+                ?? throw new McpException($"{key} 용도로 분류된 모델이 목록에 없습니다.");
+            catalog.Set(key, newest.Name);
+            return $"{key} 모델을 최신 모델 {newest.Name} 으로 선택했습니다.\n\n{SelectionTable(await TryGetModelsAsync(cancellationToken))}";
         }
 
         var name = ModelCatalog.StripPrefix(model);
         var note = "";
+        ModelList? list = null;
         if (!skip_validation)
         {
-            var list = await gemini.ListModelsAsync(cancellationToken);
-            var match = (list["models"] as JsonArray ?? new JsonArray()).OfType<JsonObject>()
-                .FirstOrDefault(m => ModelCatalog.StripPrefix(m["name"]?.GetValue<string>() ?? "") == name);
+            list = await catalog.GetModelsAsync(refresh: false, cancellationToken);
+            var match = list.Find(name);
             if (match is null)
             {
-                var similar = (list["models"] as JsonArray ?? new JsonArray()).OfType<JsonObject>()
-                    .Where(m => ModelCatalog.Classify(m) is { } c && (c == key || (key == ModelCatalog.Text && c == ModelCatalog.Pro)))
-                    .Select(m => ModelCatalog.StripPrefix(m["name"]!.GetValue<string>()))
-                    .Take(15);
+                // 캐시 이후 새로 나온 모델일 수 있으므로 한 번 새로 받아 다시 찾습니다.
+                list = await catalog.GetModelsAsync(refresh: true, cancellationToken);
+                match = list.Find(name);
+            }
+            if (match is null)
+            {
+                var candidates = ModelInfo.Newest(list.Models.Where(m => FitsCategory(m, key))).Select(m => m.Name).Take(15);
                 throw new McpException(
-                    $"'{name}' 모델을 현재 API 키의 모델 목록에서 찾을 수 없습니다. {key} 용도 후보: {string.Join(", ", similar)}\n" +
+                    $"'{name}' 모델을 현재 API 키의 모델 목록에서 찾을 수 없습니다. {key} 용도 후보(최신순): {string.Join(", ", candidates)}\n" +
                     "그래도 쓰려면 skip_validation=true 로 다시 호출하세요.");
             }
 
-            var actual = ModelCatalog.Classify(match);
-            if (actual != key && !(key == ModelCatalog.Text && actual == ModelCatalog.Pro) && !(key == ModelCatalog.Pro && actual == ModelCatalog.Text))
-                note = $"\n주의: 이 모델은 '{actual ?? "other"}' 용도로 보입니다. {key} 도구에서 동작하지 않을 수 있습니다.\n";
+            if (!FitsCategory(match, key))
+                note = $"\n주의: 이 모델은 '{match.Category ?? match.OtherKind}' 용도로 보입니다. {key} 도구에서 동작하지 않을 수 있습니다.\n";
+            else if (match.IsPreview)
+                note = "\n참고: 미리보기 모델은 예고 없이 종료될 수 있습니다.\n";
         }
 
         catalog.Set(key, name);
-        return $"{key} 모델을 {name} 으로 선택했습니다.{note}\n\n{SelectionTable()}";
+        return $"{key} 모델을 {name} 으로 선택했습니다.{note}\n\n{SelectionTable(list ?? await TryGetModelsAsync(cancellationToken))}";
     }
 
-    private string SelectionTable()
+    /// <summary>text 용도에는 pro 모델도, pro 용도에는 text 모델도 쓸 수 있습니다.</summary>
+    private static bool FitsCategory(ModelInfo model, string category) =>
+        model.Category == category
+        || (category == ModelCatalog.Text && model.Category == ModelCatalog.Pro)
+        || (category == ModelCatalog.Pro && model.Category == ModelCatalog.Text);
+
+    private async Task<ModelList?> TryGetModelsAsync(CancellationToken ct)
+    {
+        try
+        {
+            return await catalog.GetModelsAsync(refresh: false, ct);
+        }
+        catch (McpException)
+        {
+            // 목록을 못 받아도 선택 자체는 끝났으므로 경고 없이 표만 보여줍니다.
+            return null;
+        }
+    }
+
+    private string FormatModel(ModelInfo m, string group)
+    {
+        var sb = new StringBuilder($"- {m.Name}");
+        if (group != "other" && catalog.Get(group) == m.Name)
+            sb.Append(" ★");
+        if (m.IsLatestAlias)
+            sb.Append(" [latest]");
+        else if (m.IsPreview)
+            sb.Append(" [preview]");
+        if (m.DisplayName is not null)
+            sb.Append($" — {m.DisplayName}");
+        if (m.OtherKind is not null)
+            sb.Append($" ({m.OtherKind})");
+        if (m.InputTokenLimit is not null)
+            sb.Append($"  in={m.InputTokenLimit} out={m.OutputTokenLimit}");
+        return sb.ToString();
+    }
+
+    /// <summary>용도별 현재 모델. 목록이 있으면 목록에 없는(종료되었거나 잘못된) 모델을 ⚠ 로 표시하고 최신 후보를 제안합니다.</summary>
+    private string SelectionTable(ModelList? list)
     {
         var sb = new StringBuilder("현재 선택된 모델:\n");
         foreach (var category in ModelCatalog.Categories)
-            sb.Append($"- {category}: {catalog.Get(category)}{(catalog.IsCustom(category) ? "" : " (기본값)")}\n");
+        {
+            var current = catalog.Get(category);
+            sb.Append($"- {category}: {current}{(catalog.IsCustom(category) ? "" : " (기본값)")}");
+            if (list is not null && list.Find(current) is null)
+            {
+                var newest = ModelCatalog.Newest(list, category);
+                sb.Append(" ⚠ 모델 목록에 없음(종료되었거나 이름 오류)");
+                if (newest is not null)
+                    sb.Append($" → 후보: {newest.Name} (gemini_select_model {{ category: \"{category}\", model: \"{newest.Name}\" }})");
+            }
+            sb.Append('\n');
+        }
         return sb.ToString();
     }
 

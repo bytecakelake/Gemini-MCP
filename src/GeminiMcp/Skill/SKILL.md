@@ -20,7 +20,7 @@ description: Gemini MCP 서버(gemini_* 도구) 사용법. Claude 가 직접 할
 | 계산·데이터 분석을 Python 샌드박스에서 실행 | `gemini_run_code` | `task`, `files[]` |
 | 세컨드 오피니언, 교차 검증, 초대형 컨텍스트(1M 토큰) 분석, JSON 구조화 출력 | `gemini_ask` | `prompt`, `files[]`, `model`, `json_schema` |
 | 텍스트·이미지 → 영상(MP4) 생성, 기존 영상 편집·연장 | `gemini_generate_video` | `prompt`, `input_images[]`, `input_video`, `previous_interaction_id`, `aspect_ratio`, `resolution` |
-| 사용 가능한 모델을 용도별로 확인 (★ = 현재 선택) | `gemini_list_models` | `category`, `filter` |
+| 사용 가능한 모델을 용도별·최신순으로 확인 (★ = 현재 선택, ⚠ = 종료된 모델) | `gemini_list_models` | `category`, `filter`, `refresh` |
 | 용도별 기본 모델 변경 | `gemini_select_model` | `category`, `model` |
 | 이 설명서 다시 보기 | `gemini_usage_guide` | — |
 
@@ -33,7 +33,10 @@ description: Gemini MCP 서버(gemini_* 도구) 사용법. Claude 가 직접 할
    - `model` 을 생략하면 그 도구 용도에 선택된 모델을 씁니다 (처음에는 내장 기본값, 예: text = flash).
      어려운 추론·긴 분석은 `model: "pro"`.
    - 계속 쓸 모델을 바꾸려면 `gemini_list_models { category }` 로 후보를 보고 `gemini_select_model { category, model }` 로 선택합니다.
-     선택은 서버 전역이며 모든 클라이언트에 적용되고 재시작 후에도 유지됩니다. `model: "default"` 로 되돌립니다.
+     선택은 서버 전역이며 모든 클라이언트에 적용되고 재시작 후에도 유지됩니다. `model: "default"` 로 되돌리고,
+     `model: "newest"` 는 그 용도의 최신 모델을 고릅니다.
+   - 목록은 최신순이며 1시간 캐시됩니다(`refresh: true` 로 갱신). 현재 선택 옆에 ⚠ 가 보이면 그 모델이 종료된 것이므로
+     표시된 후보로 교체하세요. `[preview]` 모델은 예고 없이 종료될 수 있습니다.
    - 이번 호출만 다른 모델을 쓰려면 각 도구의 `model` 인수에 이름을 넘깁니다. 사용자가 요청하지 않았다면 전역 선택은 바꾸지 마세요.
 3. **영상 생성**은 수 분이 걸릴 수 있습니다. 결과의 `interaction_id` 를 `previous_interaction_id` 로 넘기면
    방금 만든 영상을 이어서 편집·연장합니다(재업로드 불필요). 네거티브 프롬프트 필드는 없으므로 피할 내용은 프롬프트에 문장으로 적습니다.

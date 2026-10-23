@@ -42,6 +42,74 @@ public sealed class GeminiToolTests(DefaultServer server) : IAsyncLifetime
         Assert.DoesNotContain("## text", images);
     }
 
+    /// <summary>이름에 용도가 드러나지 않는 최신 모델도 설명·계열로 올바르게 분류되는지 검증합니다.</summary>
+    [Fact]
+    public async Task ListModels_ClassifiesSpecialFamilies()
+    {
+        var text = (await _client.CallOkAsync("gemini_list_models", new() { ["include_other"] = true })).Text();
+        var sections = ParseSections(text);
+
+        Assert.Contains(sections["text"], l => l.Contains("gemini-flash-latest") && l.Contains("[latest]"));
+        Assert.All(sections["text"].Concat(sections["pro"]), l =>
+            Assert.DoesNotMatch(@"^- (lyria|deep-research|antigravity|nano-banana|gemini-nano-banana)", l));
+        Assert.DoesNotContain(sections["pro"], l => l.Contains("tts"));
+        if (text.Contains("nano-banana"))
+            Assert.Contains(sections["image"], l => l.Contains("nano-banana"));
+        if (text.Contains("lyria"))
+            Assert.Contains(sections["other"], l => l.StartsWith("- lyria") && l.Contains("음악 생성"));
+        Assert.Contains(sections["video"], l => l.Contains("gemini-omni"));
+    }
+
+    [Fact]
+    public async Task ListModels_SortsNewestFirst()
+    {
+        var text = (await _client.CallOkAsync("gemini_list_models", new() { ["category"] = "text" })).Text();
+        var names = ParseSections(text)["text"].Select(l => l.Split(' ')[1]).ToList();
+
+        // '-latest' 별칭이 맨 위, 그다음 gemini 버전 번호가 내림차순.
+        Assert.EndsWith("-latest", names[0]);
+        var versions = names.Where(n => !n.EndsWith("-latest") && n.StartsWith("gemini-"))
+            .Select(n => System.Text.RegularExpressions.Regex.Match(n, @"(?<=-)\d+(\.\d+)?(?=-|$)"))
+            .Where(m => m.Success)
+            .Select(m => decimal.Parse(m.Value, System.Globalization.CultureInfo.InvariantCulture))
+            .ToList();
+        Assert.True(versions.Count > 1);
+        Assert.Equal(versions.OrderByDescending(v => v), versions);
+    }
+
+    [Fact]
+    public async Task ListModels_IsCachedUntilRefresh()
+    {
+        Assert.SkipWhen(server.IsExternal, "Needs the server log of a local process.");
+        static int Fetches(string log) => log.Split("models.list 를 새로 받았습니다").Length - 1;
+
+        await _client.CallOkAsync("gemini_list_models", new() { ["refresh"] = true });
+        var afterRefresh = Fetches(server.Log);
+        await _client.CallOkAsync("gemini_list_models", new() { ["category"] = "tts" });
+        var cachedText = (await _client.CallOkAsync("gemini_list_models", new())).Text();
+        Assert.Equal(afterRefresh, Fetches(server.Log));
+        Assert.Contains("캐시 60분", cachedText);
+
+        await _client.CallOkAsync("gemini_list_models", new() { ["refresh"] = true });
+        Assert.Equal(afterRefresh + 1, Fetches(server.Log));
+    }
+
+    private static Dictionary<string, List<string>> ParseSections(string text)
+    {
+        var sections = new[] { "text", "pro", "image", "tts", "video", "other" }.ToDictionary(s => s, _ => new List<string>());
+        List<string>? current = null;
+        foreach (var line in text.Split('\n'))
+        {
+            if (line.StartsWith("## "))
+                current = sections[line[3..].Trim()];
+            else if (line.StartsWith("- ") && current is not null)
+                current.Add(line);
+            else if (line.Length == 0)
+                current = null;
+        }
+        return sections;
+    }
+
     [Fact]
     public async Task SelectModel_RejectsUnknownModel()
     {

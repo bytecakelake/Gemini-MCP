@@ -90,12 +90,13 @@ public sealed class McpProtocolTests(DefaultServer server) : IAsyncLifetime
                 ["model"] = "models/test-tts-model",
                 ["skip_validation"] = true,
             });
-            Assert.Contains("- tts: test-tts-model\n", set.Text());
+            // 모델 목록을 받을 수 있으면 목록에 없는 모델은 ⚠ 와 최신 후보로 표시됩니다.
+            Assert.Contains(server.ApiKey is null ? "- tts: test-tts-model\n" : "- tts: test-tts-model ⚠", set.Text());
         }
         finally
         {
             var reset = await _client.CallOkAsync("gemini_select_model", new() { ["category"] = "tts", ["model"] = "default" });
-            Assert.Contains("- tts: gemini-2.5-flash-preview-tts (기본값)", reset.Text());
+            Assert.Contains("- tts: gemini-3.8-flash-tts (기본값)", reset.Text());
         }
     }
 

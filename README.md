@@ -43,12 +43,20 @@ dashboard ─(Admin API)─▶ APISIX ─▶ etcd (라우트·API 키)
 `gemini_select_model { category, model }` 로 용도별 기본 모델을 바꿉니다(`model: "default"` 로 초기화). 선택은 서버 전역이며
 출력 폴더의 `.gemini-mcp-models.json` 에 저장되어 재시작 후에도 유지됩니다. 한 번만 다른 모델을 쓰려면 각 도구의 `model` 인수를 넘기면 됩니다.
 
+- **최신 모델 반영**: 목록은 `models.list` 에서 받아 1시간(3600초) 캐시합니다. `refresh: true` 로 즉시 새로 받을 수 있고,
+  `gemini_select_model` 은 캐시에 없는 이름이면 한 번 새로 받아 다시 확인합니다.
+- **분류**: 이름뿐 아니라 표시 이름·설명과 모델 계열로 판단합니다. 예를 들어 `nano-banana-*` 는 image 로,
+  음악(`lyria`)·에이전트(`deep-research`, `antigravity`, `computer-use`)·로보틱스·전사·임베딩·Live 전용 모델은 `other` 로 분류됩니다(`include_other: true` 로 표시).
+- **정렬**: `-latest` 별칭 → gemini 계열 → 버전 높은 순 → 정식 버전 순. `[latest]`, `[preview]` 표시가 붙습니다.
+- **기본값 점검**: 선택(또는 기본) 모델이 목록에 없으면(종료 등) ⚠ 와 함께 그 용도의 최신 후보를 보여줍니다.
+  `gemini_select_model { category, model: "newest" }` 로 최신 모델을 바로 고를 수 있습니다.
+
 | category | 쓰는 도구 | 내장 기본값 |
 |---|---|---|
 | `text` | ask, web_search, read_urls, analyze_media, run_code | `gemini-flash-latest` |
 | `pro` | 위 도구에서 `model: "pro"` | `gemini-pro-latest` |
 | `image` | generate_image | `gemini-3.1-flash-image` |
-| `tts` | text_to_speech | `gemini-2.5-flash-preview-tts` |
+| `tts` | text_to_speech | `gemini-3.8-flash-tts` |
 | `video` | generate_video | `gemini-omni-1.1-flash` |
 
 ## 내장 스킬

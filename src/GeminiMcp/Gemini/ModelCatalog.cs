@@ -21,19 +21,25 @@ public sealed class ModelCatalog
         [Text] = "gemini-flash-latest",
         [Pro] = "gemini-pro-latest",
         [Image] = "gemini-3.1-flash-image",
-        [Tts] = "gemini-2.5-flash-preview-tts",
+        [Tts] = "gemini-3.8-flash-tts",
         [Video] = "gemini-omni-1.1-flash",
     };
 
     public static IEnumerable<string> Categories => Defaults.Keys;
 
+    public static readonly TimeSpan ModelListTtl = TimeSpan.FromSeconds(3600);
+
     private readonly Dictionary<string, string> _selected = new(StringComparer.OrdinalIgnoreCase);
     private readonly Lock _lock = new();
+    private readonly SemaphoreSlim _fetchLock = new(1, 1);
     private readonly string _statePath;
+    private readonly GeminiClient _gemini;
     private readonly ILogger<ModelCatalog> _logger;
+    private volatile ModelList? _models;
 
-    public ModelCatalog(GeminiOptions options, ILogger<ModelCatalog> logger)
+    public ModelCatalog(GeminiClient gemini, GeminiOptions options, ILogger<ModelCatalog> logger)
     {
+        _gemini = gemini;
         _logger = logger;
         _statePath = Path.Combine(options.OutputDirectory, ".gemini-mcp-models.json");
         Load();
@@ -83,25 +89,38 @@ public sealed class ModelCatalog
         return StripPrefix(value);
     }
 
-    /// <summary>models.list 항목이 어느 용도에 맞는지 추정합니다. 맞는 용도가 없으면 null.</summary>
-    public static string? Classify(JsonObject model)
+    /// <summary>
+    /// models.list 결과. 모든 호출이 API 를 다시 부르지 않도록 <see cref="ModelListTtl"/> 동안 캐시합니다.
+    /// refresh=true 면 캐시를 무시하고 새로 받아옵니다.
+    /// </summary>
+    public async Task<ModelList> GetModelsAsync(bool refresh, CancellationToken ct)
     {
-        var name = StripPrefix(model["name"]?.GetValue<string>() ?? "").ToLowerInvariant();
-        var methods = (model["supportedGenerationMethods"] as JsonArray ?? new JsonArray())
-            .Select(x => x?.GetValue<string>()).OfType<string>().ToList();
+        var cached = _models;
+        if (!refresh && cached is not null && DateTimeOffset.UtcNow - cached.FetchedAt < ModelListTtl)
+            return cached;
 
-        if (name.Contains("omni") || name.Contains("veo"))
-            return Video;
-        if (!methods.Contains("generateContent"))
-            return null;
-        if (name.Contains("tts"))
-            return Tts;
-        if (name.Contains("image"))
-            return Image;
-        if (name.Contains("embedding") || name.Contains("aqa") || name.Contains("native-audio") || name.Contains("live"))
-            return null;
-        return name.Contains("pro") ? Pro : Text;
+        await _fetchLock.WaitAsync(ct);
+        try
+        {
+            // 기다리는 동안 다른 요청이 이미 새로 받아왔으면 그 결과를 씁니다.
+            if (_models is { } fresh && fresh != cached && DateTimeOffset.UtcNow - fresh.FetchedAt < ModelListTtl)
+                return fresh;
+
+            var raw = await _gemini.ListModelsAsync(ct);
+            var models = (raw["models"] as JsonArray ?? new JsonArray()).OfType<JsonObject>().Select(ModelInfo.Parse).ToList();
+            _models = new ModelList(models, DateTimeOffset.UtcNow);
+            _logger.LogInformation("models.list 를 새로 받았습니다 ({Count}개)", models.Count);
+            return _models;
+        }
+        finally
+        {
+            _fetchLock.Release();
+        }
     }
+
+    /// <summary>해당 용도에서 가장 최신인 모델 ('-latest' 별칭 우선, 정식 버전 우선).</summary>
+    public static ModelInfo? Newest(ModelList list, string category) =>
+        ModelInfo.Newest(list.Models.Where(m => m.Category == category)).FirstOrDefault();
 
     public static string NormalizeCategory(string category)
     {
@@ -153,4 +172,10 @@ public sealed class ModelCatalog
             _logger.LogWarning(ex, "모델 선택을 저장하지 못했습니다: {Path}", _statePath);
         }
     }
+}
+
+/// <summary>캐시된 models.list 결과와 받아온 시각.</summary>
+public sealed record ModelList(IReadOnlyList<ModelInfo> Models, DateTimeOffset FetchedAt)
+{
+    public ModelInfo? Find(string name) => Models.FirstOrDefault(m => m.Name == ModelCatalog.StripPrefix(name));
 }
