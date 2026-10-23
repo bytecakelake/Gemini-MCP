@@ -1,7 +1,7 @@
 import vuetify, { transformAssetUrls } from "vite-plugin-vuetify";
 
-// 관리 대시보드. 브라우저는 게이트웨이(/api/admin)와 같은 출처에서 이 앱을 받으므로 SPA 로 충분합니다.
-// 서버는 Nitro deno-server 프리셋으로 빌드해 Deno 에서 실행합니다.
+// 관리 대시보드. 화면은 SPA 이고, 서버(server/, Nitro deno-server 프리셋, Deno)가 관리 API(/api/admin)로
+// 관리자 인증, APISIX Admin API(라우트·API 키), Loki(로그·지표) 조회를 맡습니다.
 export default defineNuxtConfig({
   compatibilityDate: "2026-10-01",
   ssr: false,
@@ -38,10 +38,6 @@ export default defineNuxtConfig({
 
   nitro: {
     preset: "deno-server",
-    // `deno task dev` 로 대시보드만 띄울 때 관리 API 를 로컬 게이트웨이로 넘깁니다.
-    devProxy: {
-      "/api/admin": { target: "http://127.0.0.1:8080/api/admin", changeOrigin: false },
-    },
   },
 
   typescript: { strict: true },

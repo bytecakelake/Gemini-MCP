@@ -10,8 +10,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"  # docker/ folder: compose file, .env, .env.example
 ENV_FILE="$ROOT/.env"
-HEALTH_CHECKED=(gemini-mcp gemini-mcp-dashboard gemini-mcp-gateway)
-GATEWAY="gemini-mcp-gateway"
+HEALTH_CHECKED=(gemini-mcp gemini-mcp-etcd gemini-mcp-apisix gemini-mcp-dashboard)
+DASHBOARD="gemini-mcp-dashboard"
 PROXY="gemini-mcp-caddy"
 CA_FILE="$ROOT/caddy-root.crt"
 
@@ -114,12 +114,12 @@ cert() {
   echo "Trust it in the Windows user store : certutil -user -addstore Root \"$CA_FILE\""
 }
 
-# The gateway prints a one-time setup code while no dashboard admin exists (no shell in the image, so ask it with deno eval).
+# The dashboard prints a one-time setup code while no admin exists (no shell in the image, so ask it with deno eval).
 show_setup_code() {
   local state code
-  state="$(docker exec "$GATEWAY" deno eval "const r = await fetch('http://127.0.0.1:8080/api/admin/auth/state'); console.log((await r.json()).setupRequired)" 2>/dev/null || true)"
+  state="$(docker exec "$DASHBOARD" deno eval "const r = await fetch('http://127.0.0.1:3000/api/admin/auth/state'); console.log((await r.json()).setupRequired)" 2>/dev/null || true)"
   [ "$state" = "true" ] || return 0
-  code="$(docker logs "$GATEWAY" 2>&1 | sed -n 's/.*Dashboard setup code: \([A-Z0-9-]*\).*/\1/p' | tail -1)"
+  code="$(docker logs "$DASHBOARD" 2>&1 | sed -n 's/.*Dashboard setup code: \([A-Z0-9-]*\).*/\1/p' | tail -1)"
   [ -n "$code" ] && echo "Setup code   : $code  (create the dashboard admin password with it)"
   return 0
 }
@@ -154,7 +154,7 @@ up() {
 
 reset_admin() {
   require_docker
-  docker exec "$GATEWAY" deno run --allow-env --allow-read=/data --allow-write=/data main.ts --reset-admin
+  docker exec "$DASHBOARD" deno eval "await Deno.remove('/data/admin.json').catch(() => {}); console.log('Dashboard admin account deleted.')"
   show_setup_code
 }
 

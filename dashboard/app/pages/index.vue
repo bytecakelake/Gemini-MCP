@@ -118,14 +118,6 @@ function histLabel(le: number | null, index: number) {
       </v-col>
       <v-col cols="12" sm="6" lg="3">
         <StatTile
-          label="게이트웨이"
-          :value="formatDuration(status.gateway.uptimeSeconds)"
-          :hint="`v${status.gateway.version} · Deno ${status.gateway.deno} · 메모리 ${formatBytes(status.gateway.memory.rss)} · 처리 중 ${status.gateway.inflight}`"
-          :icon="mdiTimerOutline"
-        />
-      </v-col>
-      <v-col cols="12" sm="6" lg="3">
-        <StatTile
           label="API 키"
           :value="`${status.keys.active} 활성`"
           :hint="`전체 ${status.keys.total} · 비활성 ${status.keys.disabled} · 만료 ${status.keys.expired}`"
@@ -143,7 +135,7 @@ function histLabel(le: number | null, index: number) {
         <StatTile
           label="오류율"
           :value="formatPercent(totals.errorRate)"
-          :hint="`오류 ${formatNumber(totals.errors)} (도구 오류 ${formatNumber(totals.toolErrors)})`"
+          :hint="`오류 응답(4xx·5xx) ${formatNumber(totals.errors)}`"
           :icon="mdiAlertCircleOutline"
           :tone="totals.errorRate > 0.05 ? 'error' : undefined"
         />
@@ -152,7 +144,7 @@ function histLabel(le: number | null, index: number) {
         <StatTile
           label="지연 시간 p95"
           :value="formatMs(totals.p95Ms)"
-          :hint="`p50 ${formatMs(totals.p50Ms)} · p99 ${formatMs(totals.p99Ms)} · 최대 ${formatMs(totals.maxMs)}`"
+          :hint="`p50 ${formatMs(totals.p50Ms)} · p99 ${formatMs(totals.p99Ms)}`"
           :icon="mdiTimerOutline"
         />
       </v-col>

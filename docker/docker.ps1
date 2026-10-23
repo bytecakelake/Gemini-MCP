@@ -23,8 +23,8 @@ param(
 $ErrorActionPreference = "Continue"
 $root = $PSScriptRoot  # docker/ folder: compose file, .env, .env.example
 $envFile = Join-Path $root ".env"
-$healthChecked = @("gemini-mcp", "gemini-mcp-dashboard", "gemini-mcp-gateway")
-$gateway = "gemini-mcp-gateway"
+$healthChecked = @("gemini-mcp", "gemini-mcp-etcd", "gemini-mcp-apisix", "gemini-mcp-dashboard")
+$dashboard = "gemini-mcp-dashboard"
 $proxy = "gemini-mcp-caddy"
 $caFile = Join-Path $root "caddy-root.crt"
 
@@ -125,11 +125,11 @@ function Get-Setting([string]$name, [string]$default) {
     if ($value) { $value } else { $default }
 }
 
-# The gateway prints a one-time setup code while no dashboard admin exists (no shell in the image, so ask it with deno eval).
+# The dashboard prints a one-time setup code while no admin exists (no shell in the image, so ask it with deno eval).
 function Show-SetupCode {
-    $state = docker exec $gateway deno eval "const r = await fetch('http://127.0.0.1:8080/api/admin/auth/state'); console.log((await r.json()).setupRequired)" 2>$null
+    $state = docker exec $dashboard deno eval "const r = await fetch('http://127.0.0.1:3000/api/admin/auth/state'); console.log((await r.json()).setupRequired)" 2>$null
     if ($state -ne "true") { return }
-    $code = docker logs $gateway 2>&1 | Select-String -Pattern "Dashboard setup code: (\S+)" | Select-Object -Last 1
+    $code = docker logs $dashboard 2>&1 | Select-String -Pattern "Dashboard setup code: (\S+)" | Select-Object -Last 1
     if ($code) {
         Write-Host "Setup code   : $($code.Matches[0].Groups[1].Value)  (create the dashboard admin password with it)"
     }
@@ -173,8 +173,8 @@ function Invoke-Up([string[]]$buildArgs) {
 
 function Invoke-ResetAdmin {
     Assert-Docker
-    docker exec $gateway deno run --allow-env --allow-read=/data --allow-write=/data main.ts --reset-admin
-    if ($LASTEXITCODE -ne 0) { throw "reset-admin failed (is $gateway running?)" }
+    docker exec $dashboard deno eval "await Deno.remove('/data/admin.json').catch(() => {}); console.log('Dashboard admin account deleted.')"
+    if ($LASTEXITCODE -ne 0) { throw "reset-admin failed (is $dashboard running?)" }
     Show-SetupCode
 }
 

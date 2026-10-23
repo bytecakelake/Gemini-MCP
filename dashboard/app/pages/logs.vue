@@ -2,7 +2,6 @@
 import {
   mdiAlert,
   mdiAlertOctagon,
-  mdiDeleteSweepOutline,
   mdiInformationOutline,
   mdiMagnify,
   mdiPause,
@@ -18,8 +17,6 @@ const loading = ref(false);
 const error = ref("");
 const live = ref(true);
 const keys = ref<ApiKey[]>([]);
-const confirmClear = ref(false);
-const snackbar = ref("");
 
 const filters = reactive({ kind: "", level: "", keyId: "", tool: "", q: "" });
 const kinds = [
@@ -73,29 +70,18 @@ async function load(more = false) {
   }
 }
 
-function matchesFilters(entry: LogEntry) {
-  if (filters.kind && entry.kind !== filters.kind) return false;
-  if (filters.level && entry.level !== filters.level) return false;
-  if (filters.keyId && entry.keyId !== filters.keyId) return false;
-  if (filters.tool && entry.tool !== filters.tool) return false;
-  if (filters.q) {
-    const hay = [entry.message, entry.keyName, entry.tool, entry.rpcMethod, entry.ip, entry.status].join(" ");
-    if (!hay.toLowerCase().includes(filters.q.toLowerCase())) return false;
+// 실시간: 3초마다 최신 로그를 가져와 처음 보는 항목만 맨 위에 붙입니다 (Loki 는 요청 후 1~2초 안에 기록).
+async function poll() {
+  if (!live.value || loading.value) return;
+  try {
+    const res = await api<{ items: LogEntry[] }>("/logs", { query: query() });
+    const seen = new Set(items.value.map((i) => i.id));
+    const fresh = res.items.filter((i) => !seen.has(i.id));
+    if (fresh.length) items.value = [...fresh, ...items.value].slice(0, 2000);
+    for (const tool of fresh.map((i) => i.tool)) if (tool && !toolOptions.value.includes(tool)) toolOptions.value.push(tool);
+  } catch {
+    // 다음 주기에 다시 시도합니다.
   }
-  return true;
-}
-
-// 실시간: 게이트웨이의 SSE 스트림으로 새 로그를 받아 맨 위에 붙입니다.
-let source: EventSource | undefined;
-function connect() {
-  source?.close();
-  if (!live.value) return;
-  source = new EventSource("/api/admin/logs/stream");
-  source.onmessage = (event) => {
-    const entry = JSON.parse(event.data) as LogEntry;
-    if (entry.tool && !toolOptions.value.includes(entry.tool)) toolOptions.value.push(entry.tool);
-    if (matchesFilters(entry)) items.value = [entry, ...items.value].slice(0, 2000);
-  };
 }
 
 let debounce: ReturnType<typeof setTimeout> | undefined;
@@ -103,11 +89,11 @@ watch(filters, () => {
   clearTimeout(debounce);
   debounce = setTimeout(() => load(), 300);
 });
-watch(live, connect);
 
+let timer: ReturnType<typeof setInterval> | undefined;
 onMounted(async () => {
   await load();
-  connect();
+  timer = setInterval(poll, 3_000);
   try {
     keys.value = (await api<{ items: ApiKey[] }>("/keys")).items;
     toolOptions.value = (await api<{ items: { name: string }[] }>("/tools")).items.map((t) => t.name);
@@ -115,18 +101,7 @@ onMounted(async () => {
     // 필터 후보를 못 가져와도 로그 화면은 동작합니다.
   }
 });
-onBeforeUnmount(() => source?.close());
-
-async function clearLogs() {
-  confirmClear.value = false;
-  try {
-    const res = await api<{ removed: number }>("/logs", { method: "DELETE" });
-    snackbar.value = `로그 ${res.removed}건을 삭제했습니다.`;
-    await load();
-  } catch (err) {
-    error.value = errorMessage(err);
-  }
-}
+onBeforeUnmount(() => clearInterval(timer));
 </script>
 
 <template>
@@ -143,7 +118,6 @@ async function clearLogs() {
         {{ live ? "실시간 수신 중" : "실시간 꺼짐" }}
       </v-btn>
       <v-btn :icon="mdiRefresh" variant="text" :loading="loading" aria-label="새로고침" @click="load()" />
-      <v-btn :icon="mdiDeleteSweepOutline" variant="text" aria-label="로그 삭제" @click="confirmClear = true" />
     </div>
 
     <v-card class="mb-4">
@@ -233,7 +207,6 @@ async function clearLogs() {
                 <v-col cols="12" sm="6" md="3">
                   <b>요청/응답</b> · {{ formatBytes(item.bytesIn ?? 0) }} / {{ formatBytes(item.bytesOut ?? 0) }}
                 </v-col>
-                <v-col cols="12" sm="6" md="3"><b>도구 오류</b> · {{ item.toolError ? "예" : "아니요" }}</v-col>
                 <v-col cols="12" md="6"><b>User-Agent</b> · <span class="mono">{{ item.userAgent ?? "—" }}</span></v-col>
               </v-row>
             </td>
@@ -247,16 +220,5 @@ async function clearLogs() {
         <v-btn v-if="nextBefore" variant="text" :loading="loading" @click="load(true)">더 보기</v-btn>
       </div>
     </v-card>
-
-    <v-dialog v-model="confirmClear" max-width="420">
-      <v-card title="로그를 모두 삭제할까요?" text="요청·관리·시스템 로그가 모두 삭제되며 되돌릴 수 없습니다. 모니터링 지표는 유지됩니다.">
-        <v-card-actions>
-          <v-spacer />
-          <v-btn @click="confirmClear = false">취소</v-btn>
-          <v-btn color="error" variant="flat" @click="clearLogs">삭제</v-btn>
-        </v-card-actions>
-      </v-card>
-    </v-dialog>
-    <v-snackbar :model-value="!!snackbar" timeout="3000" @update:model-value="snackbar = ''">{{ snackbar }}</v-snackbar>
   </div>
 </template>

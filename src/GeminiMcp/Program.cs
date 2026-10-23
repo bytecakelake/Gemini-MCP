@@ -26,7 +26,7 @@ if (args.Contains("--help") || args.Contains("-h"))
           GEMINI_MCP_PATH_MAPS    호스트=컨테이너 경로 매핑 (';' 구분, Docker 실행 시)
           ASPNETCORE_URLS         수신 주소 (기본: http://127.0.0.1:5100)
 
-        인증은 하지 않습니다. 루프백/내부 네트워크에만 노출하고, 외부 접속은 gateway(API 키 인증)를 거치게 하세요.
+        인증은 하지 않습니다. 루프백/내부 네트워크에만 노출하고, 외부 접속은 API 게이트웨이(Apache APISIX, API 키 인증)를 거치게 하세요.
 
         엔드포인트:
           POST /mcp     MCP Streamable HTTP
@@ -91,7 +91,7 @@ var allowedOrigins = (builder.Configuration["MCP_ALLOWED_ORIGINS"] ?? "")
     .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
     .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-// 보안: DNS 리바인딩 방지를 위한 Origin 검사 (MCP 사양 권고사항). API 키 인증은 앞단 gateway 가 담당합니다.
+// 보안: DNS 리바인딩 방지를 위한 Origin 검사 (MCP 사양 권고사항). API 키 인증은 앞단 API 게이트웨이(Apache APISIX)가 담당합니다.
 app.Use(async (context, next) =>
 {
     if (context.Request.Path.StartsWithSegments("/mcp"))

@@ -8,11 +8,10 @@ import {
   mdiPencilOutline,
   mdiPlus,
 } from "@mdi/js";
-import type { ApiKey, IssuedKey, ToolInfo } from "~/types/api";
+import type { ApiKey, IssuedKey } from "~/types/api";
 
 const api = useApi();
 const keys = ref<ApiKey[]>([]);
-const tools = ref<ToolInfo[]>([]);
 const loading = ref(false);
 const error = ref("");
 const snackbar = ref("");
@@ -21,8 +20,7 @@ const headers = [
   { title: "이름", key: "name" },
   { title: "키", key: "prefix", sortable: false },
   { title: "상태", key: "status", width: 110 },
-  { title: "허용 도구", key: "allowedTools", sortable: false },
-  { title: "요청 수", key: "requestCount", align: "end" as const },
+  { title: "요청 수 (보존 기간)", key: "requestCount", align: "end" as const },
   { title: "마지막 사용", key: "lastUsedAt" },
   { title: "만료", key: "expiresAt" },
   { title: "", key: "actions", sortable: false, width: 120, align: "end" as const },
@@ -54,22 +52,13 @@ async function load() {
   }
 }
 
-onMounted(async () => {
-  await load();
-  try {
-    tools.value = (await api<{ items: ToolInfo[] }>("/tools")).items;
-  } catch {
-    // MCP 서버가 꺼져 있으면 도구 이름을 직접 입력합니다.
-  }
-});
+onMounted(load);
 
 // ---------- 발급 / 수정 ----------
 const editor = reactive({
   open: false,
   id: "" as string,
   name: "",
-  restrict: false,
-  allowedTools: [] as string[],
   expiresInDays: 0,
   /** 수정 시 만료일을 바꾸지 않음 */
   keepExpiry: true,
@@ -82,8 +71,6 @@ function openCreate() {
     open: true,
     id: "",
     name: "",
-    restrict: false,
-    allowedTools: [],
     expiresInDays: 90,
     keepExpiry: false,
     error: "",
@@ -95,8 +82,6 @@ function openEdit(key: ApiKey) {
     open: true,
     id: key.id,
     name: key.name,
-    restrict: key.allowedTools !== null,
-    allowedTools: key.allowedTools ?? [],
     expiresInDays: 0,
     keepExpiry: true,
     error: "",
@@ -111,15 +96,8 @@ async function save() {
     editor.error = "이름을 입력하세요.";
     return;
   }
-  if (editor.restrict && editor.allowedTools.length === 0) {
-    editor.error = "허용할 도구를 하나 이상 고르세요.";
-    return;
-  }
   editor.saving = true;
-  const body: Record<string, unknown> = {
-    name: editor.name,
-    allowedTools: editor.restrict ? editor.allowedTools : null,
-  };
+  const body: Record<string, unknown> = { name: editor.name };
   if (!editor.id || !editor.keepExpiry) body.expiresInDays = editor.expiresInDays || null;
   try {
     if (editor.id) {
@@ -195,7 +173,7 @@ const addCommand = computed(() =>
 
     <v-alert type="info" variant="tonal" density="compact" class="mb-4">
       MCP 클라이언트는 <span class="mono">Authorization: Bearer &lt;API 키&gt;</span> 헤더로
-      <span class="mono">{{ endpoint }}</span> 에 접속합니다. 키 원문은 발급 직후 한 번만 보여 주며 서버에는 해시만 저장됩니다.
+      <span class="mono">{{ endpoint }}</span> 에 접속합니다. 키 원문은 발급 직후 한 번만 보여 주며, 게이트웨이(APISIX)가 etcd 에 암호화해 보관합니다.
     </v-alert>
     <v-alert v-if="error" type="error" variant="tonal" class="mb-4">{{ error }}</v-alert>
 
@@ -219,12 +197,6 @@ const addCommand = computed(() =>
           <v-chip :color="statusMeta[item.status].color" size="small" variant="tonal">
             {{ statusMeta[item.status].text }}
           </v-chip>
-        </template>
-        <template #[`item.allowedTools`]="{ item }">
-          <span v-if="!item.allowedTools" class="text-medium-emphasis">모든 도구</span>
-          <div v-else class="d-flex flex-wrap ga-1 py-1">
-            <v-chip v-for="t in item.allowedTools" :key="t" size="x-small" class="mono">{{ t }}</v-chip>
-          </div>
         </template>
         <template #[`item.requestCount`]="{ item }">
           <span class="tabular">{{ formatNumber(item.requestCount) }}</span>
@@ -267,20 +239,6 @@ const addCommand = computed(() =>
         <v-card-text>
           <v-alert v-if="editor.error" type="error" variant="tonal" density="compact" class="mb-4">{{ editor.error }}</v-alert>
           <v-text-field v-model="editor.name" label="이름" placeholder="예: 내 노트북 Claude Code" maxlength="80" counter autofocus />
-
-          <v-switch v-model="editor.restrict" color="primary" label="사용할 수 있는 도구 제한" hide-details class="mb-2" />
-          <v-combobox
-            v-if="editor.restrict"
-            v-model="editor.allowedTools"
-            :items="tools.map((t) => t.name)"
-            label="허용 도구"
-            multiple
-            chips
-            closable-chips
-            hint="목록에 없는 이름도 입력할 수 있습니다. 제한하면 다른 도구의 tools/call 은 403 으로 거부됩니다."
-            persistent-hint
-            class="mb-4"
-          />
 
           <v-checkbox v-if="editor.id" v-model="editor.keepExpiry" label="만료일 유지" hide-details density="compact" />
           <v-select

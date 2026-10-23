@@ -1,5 +1,5 @@
-# Gemini MCP 앞단 리버스 프록시: TLS 종단 + zstd/gzip 응답 압축. 모든 요청을 gateway 로 넘깁니다
-# (gateway 가 /mcp 는 API 키로 인증해 MCP 서버로, 나머지는 대시보드로 전달).
+# Gemini MCP 앞단 리버스 프록시: TLS 종단 + zstd/gzip 응답 압축. 모든 요청을 APISIX 게이트웨이로 넘깁니다
+# (APISIX 가 /mcp 는 API 키로 인증해 MCP 서버로, 나머지는 대시보드로 전달).
 # 값은 docker-compose.yml 이 .env 에서 넘겨 줍니다.
 #   MCP_DOMAIN  인증서를 발급할 이름 (쉼표 구분, 기본: localhost, 127.0.0.1)
 #   MCP_TLS     internal = Caddy 로컬 CA 로 자체 발급 (기본)
@@ -20,9 +20,9 @@
 	# zstd 를 우선, 지원하지 않는 클라이언트에는 gzip. SSE(text/event-stream) 도 이벤트마다 flush 됩니다.
 	encode zstd gzip
 
-	reverse_proxy gateway:8080 {
+	reverse_proxy apisix:9080 {
 		# MCP SDK 는 SSE 응답에 "Content-Encoding: identity" 를 붙여 압축을 막습니다.
-		# MCP 서버·gateway 는 응답을 압축하지 않으므로 이 헤더를 지워 도구 결과(SSE)도 encode 가 압축하게 합니다.
+		# MCP 서버·APISIX 는 응답을 압축하지 않으므로 이 헤더를 지워 도구 결과(SSE)도 encode 가 압축하게 합니다.
 		header_down -Content-Encoding
 	}
 }

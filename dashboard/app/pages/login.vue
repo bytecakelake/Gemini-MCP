@@ -52,8 +52,8 @@ async function submit() {
 
     <v-card-text>
       <v-alert v-if="setupRequired" type="info" variant="tonal" density="compact" class="mb-4">
-        게이트웨이 로그에 출력된 <strong>설정 코드</strong>를 입력하세요.
-        <div class="mono mt-1">docker logs gemini-mcp-gateway</div>
+        대시보드 서버 로그에 출력된 <strong>설정 코드</strong>를 입력하세요.
+        <div class="mono mt-1">docker logs gemini-mcp-dashboard</div>
       </v-alert>
       <v-alert v-if="error" type="error" variant="tonal" density="compact" class="mb-4">{{ error }}</v-alert>
 

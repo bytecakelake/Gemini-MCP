@@ -1,0 +1,47 @@
+# Apache APISIX 설정 (etcd 모드). 라우트·컨슈머(API 키)는 대시보드 서버가 Admin API 로 관리합니다.
+#
+# Admin API 는 control 네트워크 주소(10.89.250.10)에서만 수신합니다. 이 네트워크에는 대시보드·etcd·Loki 만
+# 붙어 있어 MCP 서버나 외부(Caddy)에서는 닿을 수 없으므로, 관리 키 없이 네트워크 주소로만 접근을 제한합니다.
+apisix:
+  node_listen: 9080
+  enable_ipv6: false
+  enable_server_tokens: false
+
+nginx_config:
+  error_log_level: warn
+  http:
+    # 요청 로그는 loki-logger 플러그인이 Loki 로 보냅니다.
+    enable_access_log: false
+
+deployment:
+  role: traditional
+  role_traditional:
+    config_provider: etcd
+  admin:
+    admin_key_required: false
+    # 기본값(빈 키)이면 APISIX 가 키를 만들어 이 파일(읽기 전용)에 쓰려다 실패하므로 비워 둡니다.
+    admin_key: []
+    enable_admin_ui: false
+    allow_admin:
+      - 10.89.250.0/24
+    admin_listen:
+      ip: 10.89.250.10
+      port: 9180
+  etcd:
+    host:
+      - http://etcd:2379
+    prefix: /apisix
+    timeout: 30
+
+plugins:
+  - serverless-pre-function
+  - key-auth
+  - consumer-restriction
+  - proxy-rewrite
+  - loki-logger
+  # loki-logger(배치 처리기)가 prometheus 플러그인의 공유 메모리를 쓰므로 함께 켭니다.
+  # 지표 내보내기는 컨테이너 내부 127.0.0.1:9091 에서만 수신합니다 (대시보드 지표는 Loki 에서 계산).
+  - prometheus
+
+# TCP/UDP 스트림 프록시는 쓰지 않습니다 (기본 목록의 syslog 등이 불필요한 로드 오류를 냅니다).
+stream_plugins: []

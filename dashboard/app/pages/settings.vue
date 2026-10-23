@@ -91,12 +91,11 @@ async function changePassword() {
         </v-card>
 
         <v-card v-if="status">
-          <v-card-item title="게이트웨이" />
+          <v-card-item title="구성" subtitle="Apache APISIX(게이트웨이) · etcd · Grafana Loki(로그·지표)" />
           <v-table density="compact">
             <tbody>
-              <tr><td>버전</td><td class="tabular">v{{ status.gateway.version }} (Deno {{ status.gateway.deno }})</td></tr>
-              <tr><td>시작 시각</td><td class="tabular">{{ formatDateTime(status.gateway.startedAt) }}</td></tr>
-              <tr><td>로그·지표 보존</td><td>{{ status.gateway.logRetentionDays }}일 (LOG_RETENTION_DAYS)</td></tr>
+              <tr><td>대시보드 시작</td><td class="tabular">{{ formatDateTime(status.dashboard.startedAt) }} ({{ formatDuration(status.dashboard.uptimeSeconds) }})</td></tr>
+              <tr><td>로그·지표 보존</td><td>{{ status.dashboard.logRetentionDays }}일 (LOG_RETENTION_DAYS)</td></tr>
               <tr v-for="u in status.upstreams" :key="u.name"><td>{{ u.name }}</td><td class="mono">{{ u.url }}</td></tr>
             </tbody>
           </v-table>

@@ -4,7 +4,7 @@ using GeminiMcp.Tests.Infrastructure;
 
 namespace GeminiMcp.Tests;
 
-/// <summary>MCP 외 HTTP 엔드포인트와 보안 검사(Origin, gateway API 키) 검증.</summary>
+/// <summary>MCP 외 HTTP 엔드포인트와 보안 검사(Origin, APISIX API 키) 검증.</summary>
 [Collection(ServerCollection.Name)]
 public sealed class HttpEndpointTests(DefaultServer server)
 {

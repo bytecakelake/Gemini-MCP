@@ -9,5 +9,4 @@ docker/
 .git/
 **/.env
 *.user
-gateway/
 dashboard/

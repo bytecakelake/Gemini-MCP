@@ -13,7 +13,7 @@ namespace GeminiMcp.Tests.Infrastructure;
 ///
 /// 외부 서버 모드: GEMINI_MCP_URL 을 지정하면 프로세스를 띄우지 않고 이미 실행 중인 서버(예: Docker 컨테이너)를 검증합니다.
 ///   GEMINI_MCP_URL              서버 주소 (예: http://127.0.0.1:5100)
-///   GEMINI_MCP_API_KEY          gateway 대시보드에서 발급한 API 키 (gateway 를 거칠 때 필수)
+///   GEMINI_MCP_API_KEY          대시보드에서 발급한 API 키 (APISIX 게이트웨이를 거칠 때 필수)
 ///   GEMINI_MCP_TEST_OUTPUT_DIR  서버 출력 폴더의 호스트 경로 (Docker: HOST_SHARE_DIR\gemini-mcp-output)
 /// </summary>
 public abstract class GeminiServer : IAsyncLifetime
@@ -38,7 +38,7 @@ public abstract class GeminiServer : IAsyncLifetime
     }
 
     public bool IsExternal => _externalUrl is not null;
-    /// <summary>gateway 를 거치는 외부 서버 모드에서 쓰는 API 키. 로컬 프로세스는 인증하지 않습니다.</summary>
+    /// <summary>API 게이트웨이(APISIX)를 거치는 외부 서버 모드에서 쓰는 API 키. 로컬 프로세스는 인증하지 않습니다.</summary>
     public string? GatewayKey { get; }
     public Uri BaseUri { get; private set; } = null!;
     public Uri McpEndpoint => new(BaseUri, "/mcp");

@@ -1,14 +1,29 @@
-# Gemini MCP self-hosting: Caddy(HTTPS) → gateway → { MCP 서버, 대시보드 }
+# Gemini MCP self-hosting: Caddy(HTTPS) → Apache APISIX(게이트웨이) → { MCP 서버, 대시보드 }
 # 설정은 이 폴더의 .env 에서 읽습니다 (docker/docker.ps1 setup 또는 docker/docker.sh setup 이 생성, 예시는 .env.example).
 #
-#   클라이언트 ──HTTPS──▶ caddy ──▶ gateway ─┬─ /mcp, /skill, /health ─▶ gemini-mcp (API 키 인증은 gateway 가)
-#                                          ├─ /api/admin            ─▶ gateway 관리 API (대시보드 세션)
-#                                          └─ 그 외                  ─▶ dashboard (Nuxt)
+#   클라이언트 ─HTTPS─▶ caddy ─▶ apisix ─┬─ /mcp            ─▶ gemini-mcp  (key-auth: 대시보드에서 발급한 API 키)
+#                                       ├─ /skill, /health ─▶ gemini-mcp  (공개)
+#                                       └─ 그 외            ─▶ dashboard   (관리자 로그인)
+#   apisix ─(loki-logger)─▶ loki ◀─ dashboard (로그·지표 조회, 관리 로그 기록)
+#   dashboard ─(Admin API)─▶ apisix ─▶ etcd (라우트·API 키)
+#
+# 네트워크
+#   edge    : caddy ↔ apisix
+#   backend : apisix ↔ gemini-mcp, dashboard (도구 목록·상태 확인)
+#   control : apisix(Admin API, 10.89.250.10) ↔ dashboard, etcd, loki — MCP 서버와 외부에서는 접근 불가
 # 호스트에 포트를 게시하는 것은 caddy 뿐입니다.
 name: gemini-mcp
 
+x-hardening: &hardening
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
 services:
   gemini-mcp:
+    <<: *hardening
     # 소스(src/)가 필요하므로 빌드 컨텍스트는 저장소 루트입니다. 제외 목록은 Dockerfile.dockerignore.
     build:
       context: ..
@@ -21,6 +36,7 @@ services:
     user: "${DOCKER_UID:-1654}:${DOCKER_GID:-1654}"
     environment:
       GEMINI_API_KEY: ${GEMINI_API_KEY:?GEMINI_API_KEY 환경 변수 또는 .env 설정이 필요합니다}
+      MCP_ALLOWED_ORIGINS: ${MCP_ALLOWED_ORIGINS:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-}
       GEMINI_PRO_MODEL: ${GEMINI_PRO_MODEL:-}
       GEMINI_IMAGE_MODEL: ${GEMINI_IMAGE_MODEL:-}
@@ -30,67 +46,118 @@ services:
       GEMINI_MCP_OUTPUT_DIR: /share/${OUTPUT_SUBDIR:-gemini-mcp-output}
     volumes:
       - ${HOST_SHARE_DIR}:/share
-    read_only: true
+    tmpfs:
+      - /tmp
+    networks:
+      - backend
+
+  # API 게이트웨이 (Apache APISIX). 라우트와 API 키(컨슈머)는 etcd 에 저장되고 대시보드가 Admin API 로 관리합니다.
+  # 시작할 때 conf/nginx.conf 를 생성하므로 루트 파일시스템은 읽기 전용으로 두지 않습니다.
+  apisix:
+    image: apache/apisix:3.19.0-debian
+    container_name: gemini-mcp-apisix
+    restart: unless-stopped
+    depends_on:
+      etcd:
+        condition: service_healthy
+    volumes:
+      - ./apisix/config.yaml:/usr/local/apisix/conf/config.yaml:ro
     tmpfs:
       - /tmp
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # 이미지에 curl 이 없어 bash 로 포트만 확인합니다 (라우트는 대시보드가 시작할 때 등록).
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9080"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      edge:
+      backend:
+      control:
+        ipv4_address: 10.89.250.10
 
-  # 관리 대시보드 (Nuxt 4 + Vuetify, Deno). gateway 를 통해서만 접근합니다.
+  etcd:
+    <<: *hardening
+    image: quay.io/coreos/etcd:v3.6.16
+    container_name: gemini-mcp-etcd
+    restart: unless-stopped
+    command:
+      - etcd
+      - --name=etcd
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+      - --auto-compaction-retention=1
+    volumes:
+      - etcd-data:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - control
+
+  # 요청 로그(APISIX loki-logger)와 관리/시스템 로그(대시보드)를 저장합니다. 대시보드의 지표도 여기서 계산합니다.
+  loki:
+    <<: *hardening
+    image: grafana/loki:3.7.9
+    container_name: gemini-mcp-loki
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/loki.yaml", "-config.expand-env=true"]
+    environment:
+      LOG_RETENTION: ${LOG_RETENTION_DAYS:-7}d
+    volumes:
+      - ./loki/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/loki
+    tmpfs:
+      - /tmp
+    networks:
+      - control
+
+  # 관리 대시보드 (Nuxt 4 + Vuetify 4, Deno). 관리자 인증, API 키(APISIX 컨슈머) 관리, 로그·모니터링.
   dashboard:
+    <<: *hardening
     build:
       context: ../dashboard
     image: gemini-mcp-dashboard:latest
     container_name: gemini-mcp-dashboard
     restart: unless-stopped
+    depends_on:
+      apisix:
+        condition: service_healthy
+      loki:
+        condition: service_started
     expose:
       - "3000"
-    read_only: true
-    tmpfs:
-      - /tmp
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-
-  # API 키 인증 · 로그 · 모니터링 · 라우팅 (Deno). 키/관리자/로그/지표는 gateway-data 볼륨의 Deno KV 에 저장됩니다.
-  gateway:
-    build:
-      context: ../gateway
-    image: gemini-mcp-gateway:latest
-    container_name: gemini-mcp-gateway
-    restart: unless-stopped
-    depends_on:
-      gemini-mcp:
-        condition: service_healthy
-      dashboard:
-        condition: service_healthy
-    expose:
-      - "8080"
     environment:
-      MCP_UPSTREAM: http://gemini-mcp:5100
-      DASHBOARD_UPSTREAM: http://dashboard:3000
-      MCP_ALLOWED_ORIGINS: ${MCP_ALLOWED_ORIGINS:-}
+      APISIX_ADMIN_URL: http://10.89.250.10:9180
+      LOKI_URL: http://loki:3100
+      MCP_URL: http://gemini-mcp:5100
+      DASHBOARD_UPSTREAM: dashboard:3000
       LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-7}
+    # 관리자 계정(비밀번호 해시)을 보관합니다.
     volumes:
-      - gateway-data:/data
-    read_only: true
+      - dashboard-data:/data
     tmpfs:
       - /tmp
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
+    networks:
+      - backend
+      - control
 
   # TLS 종단 + zstd/gzip 압축 리버스 프록시 (설정: Caddyfile)
   caddy:
+    <<: *hardening
     image: caddy:2.10.2-alpine
     container_name: gemini-mcp-caddy
     restart: unless-stopped
     depends_on:
-      gateway:
+      apisix:
         condition: service_healthy
     # 기본은 호스트의 127.0.0.1 에만 노출합니다. 외부에 공개해도 MCP 는 API 키, 대시보드는 관리자 로그인이 필요합니다.
     # 컨테이너 안에서도 같은 포트로 수신해야 HTTP/3 Alt-Svc 가 호스트 포트를 광고합니다. udp = HTTP/3(QUIC).
@@ -107,21 +174,28 @@ services:
       # 로컬 CA·인증서 보존 (볼륨을 지우면 새 루트 인증서를 다시 신뢰시켜야 합니다)
       - caddy-data:/data
       - caddy-config:/config
-    read_only: true
     # 신뢰 저장소만 쓰기 가능(tmpfs)으로 둡니다: Caddy 가 시작할 때 로컬 CA 루트를 넣고
     # update-ca-certificates 가 /usr/share/ca-certificates 로부터 번들을 다시 만듭니다.
     tmpfs:
       - /tmp
       - /usr/local/share/ca-certificates
       - /etc/ssl/certs
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
     cap_add:
       - NET_BIND_SERVICE
+    networks:
+      - edge
+
+networks:
+  edge:
+  backend:
+  control:
+    ipam:
+      config:
+        - subnet: 10.89.250.0/24
 
 volumes:
-  gateway-data:
+  etcd-data:
+  loki-data:
+  dashboard-data:
   caddy-data:
   caddy-config:

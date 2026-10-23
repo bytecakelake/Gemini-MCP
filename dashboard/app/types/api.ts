@@ -1,4 +1,4 @@
-// 게이트웨이 관리 API(/api/admin) 응답 타입. gateway/src 의 정의와 맞춰 둡니다.
+// 대시보드 서버 관리 API(/api/admin, dashboard/server) 응답 타입.
 
 export interface ApiKey {
   id: string;
@@ -7,7 +7,6 @@ export interface ApiKey {
   createdAt: number;
   expiresAt: number | null;
   disabled: boolean;
-  allowedTools: string[] | null;
   lastUsedAt: number | null;
   requestCount: number;
   status: "active" | "disabled" | "expired";
@@ -35,7 +34,6 @@ export interface LogEntry {
   durationMs?: number;
   rpcMethod?: string;
   tool?: string;
-  toolError?: boolean;
   bytesIn?: number;
   bytesOut?: number;
   userAgent?: string;
@@ -58,13 +56,11 @@ export interface Metrics {
   totals: {
     requests: number;
     errors: number;
-    toolErrors: number;
     errorRate: number;
     avgMs: number;
     p50Ms: number;
     p95Ms: number;
     p99Ms: number;
-    maxMs: number;
     bytesOut: number;
   };
   latencyHistogram: { le: number | null; count: number }[];
@@ -84,13 +80,9 @@ export interface Upstream {
 }
 
 export interface Status {
-  gateway: {
-    version: string;
-    deno: string;
+  dashboard: {
     startedAt: number;
     uptimeSeconds: number;
-    memory: { rss: number; heapUsed: number; heapTotal: number };
-    inflight: number;
     logRetentionDays: number;
   };
   upstreams: Upstream[];

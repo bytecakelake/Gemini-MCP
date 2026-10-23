@@ -10,12 +10,12 @@ export const useAuthState = () => useState<AuthState | null>("auth-state", () =>
 
 /** 서버 오류 응답({ error })을 사람이 읽을 메시지로 바꿉니다. */
 export function errorMessage(err: unknown): string {
-  if (err instanceof FetchError) return err.data?.error ?? err.message;
+  if (err instanceof FetchError) return err.data?.data?.error ?? err.data?.error ?? err.data?.message ?? err.message;
   return err instanceof Error ? err.message : String(err);
 }
 
 /**
- * 게이트웨이 관리 API 호출. 세션은 HttpOnly 쿠키로 자동 전송되며,
+ * 대시보드 서버의 관리 API(/api/admin) 호출. 세션은 HttpOnly 쿠키로 자동 전송되며,
  * 세션이 만료되어 401 이 오면 로그인 화면으로 보냅니다.
  */
 export function useApi() {

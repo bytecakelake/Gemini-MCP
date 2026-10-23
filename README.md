@@ -1,20 +1,24 @@
-# Gemini MCP Server (C# / .NET 10 / Native AOT) + Gateway + Dashboard
+# Gemini MCP Server (C# / .NET 10 / Native AOT) + Apache APISIX + Dashboard
 
 Claude 가 직접 할 수 없거나 약한 작업을 Google Gemini API 에 위임하는 **HTTP(Streamable HTTP) MCP 서버**와,
-그 앞에서 **API 키 인증·로그·모니터링**을 맡는 **gateway**, 이를 관리하는 **Material Design 대시보드**로 구성됩니다.
-사용법을 알려주는 **스킬(SKILL.md)이 바이너리에 내장**되어 있습니다.
+그 앞에서 **API 키 인증·라우팅**을 맡는 오픈소스 게이트웨이 **Apache APISIX**, 요청 로그를 모으는 **Grafana Loki**,
+이를 관리하는 **Material Design 대시보드**로 구성됩니다. 사용법을 알려주는 **스킬(SKILL.md)이 바이너리에 내장**되어 있습니다.
 
 ```
-클라이언트 ──HTTPS──▶ Caddy ──▶ gateway (Deno) ─┬─ /mcp, /skill, /health ─▶ gemini-mcp (.NET AOT)
-                                              ├─ /api/admin            ─▶ 관리 API (대시보드 세션)
-                                              └─ 그 외                  ─▶ dashboard (Nuxt 4 + Vuetify 4, Deno)
+클라이언트 ─HTTPS─▶ Caddy ─▶ APISIX ─┬─ /mcp            ─▶ gemini-mcp  (key-auth: 대시보드에서 발급한 API 키)
+                                     ├─ /skill, /health ─▶ gemini-mcp  (공개)
+                                     └─ 그 외            ─▶ dashboard   (관리자 로그인)
+APISIX ─(loki-logger)─▶ Loki ◀─ dashboard (로그 조회·지표 계산, 관리 로그 기록)
+dashboard ─(Admin API)─▶ APISIX ─▶ etcd (라우트·API 키)
 ```
 
 | 서비스 | 기술 | 역할 |
 |---|---|---|
 | `gemini-mcp` | C# / .NET 10 Native AOT | MCP 도구 9종. 인증하지 않으며 내부 네트워크에만 노출 |
-| `gateway` | Deno + TypeScript | API 키 검증, 도구별 권한, 요청 로그, 지표 집계, 업스트림 상태 확인, 라우팅. 데이터는 Deno KV |
-| `dashboard` | Nuxt 4 + Vuetify 4(Material Design) + TypeScript, Nitro `deno-server` | 모니터링, 로그, API 키 관리, 설정 |
+| `apisix` | [Apache APISIX](https://apisix.apache.org/) 3.19 (Apache-2.0) | API 게이트웨이: `key-auth` 로 API 키 검증, `consumer-restriction` 으로 비활성/만료 키 차단, `loki-logger` 로 요청 로그 전송, 라우팅 |
+| `etcd` | etcd 3.6 | APISIX 설정 저장소 (라우트, 컨슈머 = API 키) |
+| `loki` | [Grafana Loki](https://grafana.com/oss/loki/) 3.7 (AGPL-3.0) | 요청·관리·시스템 로그 저장. 대시보드 지표도 LogQL 로 여기서 계산 |
+| `dashboard` | Nuxt 4 + Vuetify 4(Material Design) + TypeScript, Nitro `deno-server` | 모니터링, 로그, API 키 관리, 설정. 서버 쪽에서 관리자 인증과 APISIX·Loki 연동 |
 | `caddy` | Caddy 2 | TLS 종단, zstd/gzip 압축, HTTP/3 |
 
 ## 제공 도구
@@ -44,33 +48,37 @@ Claude 가 직접 할 수 없거나 약한 작업을 Google Gemini API 에 위�
 
 ## 인증
 
-인증은 모두 **gateway** 가 담당하며, 인증 정보를 환경 변수로 받지 않습니다.
+인증 정보는 환경 변수로 받지 않습니다.
 
-- **MCP 클라이언트**: 대시보드에서 발급한 API 키를 `Authorization: Bearer gmcp_…` 헤더로 보냅니다.
-  키 원문은 발급(또는 재발급) 직후 한 번만 보여 주고 서버에는 SHA-256 해시만 저장합니다.
-  키마다 이름, 만료일, 활성/비활성, **허용 도구 목록**(그 외 도구의 `tools/call` 은 403)을 설정할 수 있습니다.
-  키가 없거나 틀리거나 만료·비활성이면 `401` + `WWW-Authenticate: Bearer` 를 돌려줍니다. 키는 MCP 서버로 전달하지 않습니다.
-- **대시보드 관리자**: 최초 실행 시 gateway 로그에 일회용 **설정 코드**(`Dashboard setup code: XXXX-XXXX`)가 출력됩니다.
-  대시보드에 접속해 이 코드로 관리자 비밀번호(10자 이상, PBKDF2-SHA256)를 만들면, 이후에는 비밀번호로 로그인합니다.
-  세션은 `HttpOnly; SameSite=Strict` 쿠키(12시간)이고, 상태를 바꾸는 요청은 JSON 본문 + 같은 Origin 만 받습니다.
+- **MCP 클라이언트 (APISIX)**: 대시보드에서 발급한 API 키를 `Authorization: Bearer gmcp_…` 헤더로 보냅니다.
+  - API 키 하나는 APISIX 컨슈머 하나(`k_<id>`)이고, 키 원문은 그 컨슈머의 `key-auth` credential 로 etcd 에 암호화되어 저장됩니다.
+    대시보드는 키 원문을 발급(또는 재발급) 직후 한 번만 보여 줍니다.
+  - `serverless-pre-function` 이 `Bearer` 키를 `key-auth` 가 읽는 헤더로 옮기고, `proxy-rewrite` 가 `Authorization` 을 지워 키를 MCP 서버로 넘기지 않습니다.
+  - 키가 없거나 틀리면 `401` (`key-auth`), 비활성·만료 키는 `401` (`consumer-restriction` 허용 목록에서 제외, 만료는 1분마다 반영).
+- **대시보드 관리자**: 최초 실행 시 대시보드 서버 로그에 일회용 **설정 코드**(`Dashboard setup code: XXXX-XXXX`)가 출력됩니다.
+  대시보드에 접속해 이 코드로 관리자 비밀번호(10자 이상, PBKDF2-SHA256, `dashboard-data` 볼륨)를 만들면 이후에는 비밀번호로 로그인합니다.
+  세션은 `HttpOnly; SameSite=Strict` 쿠키(12시간, 대시보드 재시작 시 다시 로그인)이고, 상태를 바꾸는 요청은 JSON 본문 + 같은 Origin 만 받습니다.
   로그인·설정 코드 입력은 IP 당 5회 실패 시 5분간 잠깁니다. 비밀번호를 잊었다면 `docker.ps1 reset-admin` (또는 `docker.sh reset-admin`).
-- **Origin 검사**(DNS 리바인딩 방지): 브라우저 요청은 localhost 또는 `MCP_ALLOWED_ORIGINS` 의 Origin 만 허용합니다.
+- **APISIX Admin API**: `control` 네트워크(대시보드·etcd·Loki 만 연결)의 고정 주소에서만 수신하므로 관리 키 없이 네트워크로만 접근을 제한합니다.
+  MCP 서버나 외부(Caddy)에서는 닿지 않습니다.
+- **Origin 검사**(DNS 리바인딩 방지): MCP 서버가 브라우저 요청의 Origin 을 localhost 또는 `MCP_ALLOWED_ORIGINS` 로 제한합니다.
 
 ## 대시보드
 
 | 화면 | 내용 |
 |---|---|
-| 모니터링 | MCP 서버·대시보드 상태와 응답 시간 이력, 게이트웨이 가동 시간·메모리, 요청 수/오류율/지연 시간(p50·p95·p99)/응답 데이터, 시간대별 요청·오류 및 p95 그래프(1시간·24시간·7일), 도구별·키별 호출 수, 지연 시간 분포. 15초마다 갱신 |
-| 로그 | MCP 요청(키, JSON-RPC 메서드, 도구, 상태, 지연, 크기, 도구 오류 여부, IP, User-Agent), 관리 작업(로그인, 키 발급 등), 시스템(업스트림 장애/복구). 종류·수준·키·도구·검색어 필터, SSE 실시간 수신, 상세 펼치기, 전체 삭제 |
-| API 키 | 발급(이름·만료·허용 도구), 수정, 활성/비활성 전환, 재발급(이전 키 즉시 무효), 삭제, 사용량·마지막 사용 시각 |
-| 설정 | 클라이언트 연결 예시(Claude Code CLI, `.mcp.json`), 게이트웨이 정보, 관리자 비밀번호 변경 |
+| 모니터링 | APISIX·MCP 서버·Loki 상태와 응답 시간 이력, 요청 수/오류율/지연 시간(p50·p95·p99)/응답 데이터, 시간대별 요청·오류 및 p95 그래프(1시간·24시간·7일), 도구별·키별 호출 수, 지연 시간 분포. 15초마다 갱신 |
+| 로그 | MCP 요청(키, JSON-RPC 메서드, 도구, 상태, 지연, 크기, IP, User-Agent), 관리 작업(로그인, 키 발급 등), 시스템(서비스 장애/복구). 종류·수준·키·도구·검색어 필터, 3초 간격 실시간 갱신, 상세 펼치기 |
+| API 키 | 발급(이름·만료), 수정, 활성/비활성 전환, 재발급(이전 키 즉시 무효), 삭제, 보존 기간 내 요청 수·마지막 사용 시각 |
+| 설정 | 클라이언트 연결 예시(Claude Code CLI, `.mcp.json`), 구성 정보, 관리자 비밀번호 변경 |
 
+요청 지표는 Loki 의 요청 로그를 LogQL 로 집계하므로(로그 한 건 = 요청 한 건) 소량 트래픽에서도 정확합니다.
 로그와 지표는 `LOG_RETENTION_DAYS`(기본 7일) 동안 보존됩니다. 라이트/다크 테마는 시스템 설정을 따르고 상단 버튼으로 바꿀 수 있습니다.
 
-## Docker self-hosting (권장)
+## Docker self-hosting
 
-Native AOT 로 빌드한 MCP 서버(chiseled 이미지), Deno distroless 이미지의 gateway·dashboard, Caddy 를 모두
-non-root·읽기 전용 파일시스템·권한 제거 상태로 실행합니다. 호스트에 포트를 게시하는 것은 **Caddy** 뿐이며,
+Native AOT 로 빌드한 MCP 서버(chiseled 이미지), Deno distroless 이미지의 대시보드, APISIX·etcd·Loki·Caddy 를
+non-root·권한 제거 상태로 실행합니다(APISIX 를 뺀 나머지는 읽기 전용 파일시스템). 호스트에 포트를 게시하는 것은 **Caddy** 뿐이며,
 같은 주소에서 MCP(`/mcp`)와 대시보드(`/`)를 함께 제공합니다. 관련 파일은 [docker/](docker) 폴더에 있고 설정 파일 `.env` 도 이 폴더(`docker/.env`)에 생성됩니다.
 
 ```powershell
@@ -84,16 +92,27 @@ docker/docker.sh up           # Linux / macOS / Git Bash
 1. `up` 이 끝나면 `https://127.0.0.1:5100/` 대시보드에 접속해, 출력된 **설정 코드**로 관리자 비밀번호를 만듭니다.
 2. **API 키** 화면에서 키를 발급하고 클라이언트에 등록합니다 (아래 [Claude 에 연결](#claude-에-연결)).
 
-docker compose 를 직접 쓰는 경우: `docker compose -f docker/docker-compose.yml up -d --build` (설정 코드는 `docker logs gemini-mcp-gateway`).
+대시보드 서버는 시작할 때 APISIX 에 라우트(`/mcp`, `/skill`·`/health`, 대시보드)를 등록합니다.
+docker compose 를 직접 쓰는 경우: `docker compose -f docker/docker-compose.yml up -d --build` (설정 코드는 `docker logs gemini-mcp-dashboard`).
 
 | 명령 | 동작 |
 |---|---|
 | `setup` | `.env` 생성 (`-ShareDir`/`--share-dir`, `-Bind`/`--bind`, `-Port`/`--port`, `-Domain`/`--domain`, `-Force`/`--force`) |
-| `up` | 빌드 + 시작, 모든 healthcheck 통과까지 대기 |
+| `up` | 빌드 + 시작, healthcheck 통과까지 대기 |
 | `down` / `restart` / `logs` / `status` | 중지·삭제 / 재시작 / 로그 / 상태와 연결 정보 |
 | `rebuild` | 캐시 없이 베이스 이미지부터 다시 빌드 |
 | `cert` | Caddy 로컬 CA 루트 인증서를 `docker/caddy-root.crt` 로 내보내기 (`MCP_TLS=internal`) |
-| `reset-admin` | 대시보드 관리자 계정·세션 삭제 → 새 설정 코드 출력 (API 키·로그는 유지) |
+| `reset-admin` | 대시보드 관리자 계정 삭제 → 새 설정 코드 출력 (API 키·로그는 유지) |
+
+### 네트워크
+
+| 네트워크 | 연결 | 용도 |
+|---|---|---|
+| `edge` | caddy, apisix | 외부 요청 |
+| `backend` | apisix, gemini-mcp, dashboard | MCP·대시보드로 전달, 대시보드의 MCP 상태 확인·도구 목록 |
+| `control` (`10.89.250.0/24`) | apisix(`10.89.250.10`), dashboard, etcd, loki | APISIX Admin API, 설정 저장소, 로그 |
+
+`control` 서브넷이 다른 Docker 네트워크와 겹치면 [docker-compose.yml](docker/docker-compose.yml) 과 [apisix/config.yaml](docker/apisix/config.yaml) 의 주소를 함께 바꾸세요.
 
 ### TLS · 압축 (Caddy)
 
@@ -111,8 +130,7 @@ docker compose 를 직접 쓰는 경우: `docker compose -f docker/docker-compos
   - 이메일 주소: 공개 DNS 도메인에 Let's Encrypt/ZeroSSL 공인 인증서를 자동 발급합니다 (TLS-ALPN 검증이므로 `MCP_BIND=0.0.0.0`, `MCP_PORT=443`, `MCP_DOMAIN=<도메인>` 필요).
 - **다른 PC 에서 접속**: `setup -Bind 0.0.0.0` 후 접속에 쓰는 호스트명/IP 를 `MCP_DOMAIN` 에 추가하세요. IP 로 접속하면 SNI 가 없으므로 그 IP 를 `MCP_DEFAULT_SNI` 로 지정합니다.
   외부에 공개해도 MCP 는 API 키, 대시보드는 관리자 로그인이 있어야 쓸 수 있습니다.
-- **압축**: `Accept-Encoding` 에 따라 zstd → gzip 순으로 적용됩니다. MCP 도구 응답(SSE)도 압축됩니다.
-  gateway·MCP 서버는 압축하지 않고(업스트림 요청은 `accept-encoding: identity`) Caddy 한 곳에서만 압축합니다.
+- **압축**: `Accept-Encoding` 에 따라 zstd → gzip 순으로 적용됩니다. MCP 도구 응답(SSE)도 압축됩니다. 압축은 Caddy 한 곳에서만 합니다.
 - **HTTP/1.1 · HTTP/2 · HTTP/3**: Caddy 가 컨테이너 안에서도 `MCP_PORT` 로 수신하고 TCP·UDP 를 같은 번호로 게시하므로,
   `Alt-Svc: h3=":<MCP_PORT>"` 가 실제 호스트 포트를 광고합니다. 방화벽에서 외부 공개 시 UDP 도 열어야 HTTP/3 가 쓰입니다.
 - 설정 파일: [docker/Caddyfile](docker/Caddyfile).
@@ -123,28 +141,18 @@ docker compose 를 직접 쓰는 경우: `docker compose -f docker/docker-compos
 - **파일 공유**: 컨테이너는 호스트 파일을 볼 수 없으므로 `HOST_SHARE_DIR`(기본: 사용자 홈)을 `/share` 로 마운트하고 경로를 자동 변환합니다.
   Claude 가 `C:\Users\me\video.mp4` 를 넘기면 서버는 `/share/video.mp4` 를 읽고, 생성 파일은
   `C:\Users\me\gemini-mcp-output\...` 처럼 **호스트 경로로** 돌려줍니다. 공유 폴더 밖의 파일은 읽을 수 없습니다.
-- **gateway 데이터**: API 키 해시, 관리자 계정, 세션, 로그, 지표는 `gateway-data` 볼륨의 Deno KV(SQLite)에 저장됩니다.
+- **데이터 볼륨**: `etcd-data`(라우트·API 키), `loki-data`(로그), `dashboard-data`(관리자 비밀번호 해시), `caddy-data`(인증서).
 - 설정 항목 전체는 [docker/.env.example](docker/.env.example) 을 참고하세요. 설정 우선순위는 셸 환경 변수 > `.env` 입니다 (docker compose 와 동일).
 
-## 로컬 개발 (Docker 없이)
+## MCP 서버 단독 실행 (개발용)
 
-필요: .NET 10 SDK(+ AOT 게시 시 Visual Studio C++ 빌드 도구), Deno 2.8+.
+필요: .NET 10 SDK, Visual Studio C++ 빌드 도구(AOT 게시 시).
 
 ```powershell
 .\scripts\publish-aot.ps1                       # publish\win-x64\GeminiMcp.exe (단일 네이티브 실행 파일)
 $env:GEMINI_API_KEY = "<your key>"
-.\publish\win-x64\GeminiMcp.exe                 # MCP 서버  http://127.0.0.1:5100 (인증 없음, 루프백 전용)
+.\publish\win-x64\GeminiMcp.exe                 # http://127.0.0.1:5100/mcp (인증 없음, 루프백 전용)
 ```
-
-```bash
-cd dashboard && deno install && deno task build && deno task start    # 대시보드 http://127.0.0.1:3000
-cd gateway && deno task start                                          # gateway   http://127.0.0.1:8080 (설정 코드가 출력됨)
-```
-
-이제 `http://127.0.0.1:8080/` 이 대시보드, `http://127.0.0.1:8080/mcp` 가 키 인증 MCP 엔드포인트입니다.
-대시보드를 고치면서 보려면 `deno task dev`(Nuxt 개발 서버 :3000, `/api/admin` 은 :8080 gateway 로 프록시)를 쓰세요.
-
-### MCP 서버 환경 변수
 
 | 환경 변수 | 기본값 | 설명 |
 |---|---|---|
@@ -159,20 +167,11 @@ cd gateway && deno task start                                          # gateway
 | `ASPNETCORE_URLS` / `--urls` | `http://127.0.0.1:5100` | 수신 주소 |
 | `GEMINI_MCP_PATH_MAPS` | (없음) | `호스트경로=서버경로` 매핑 (`;` 구분). Docker 에서 사용 |
 
-MCP 서버 자체는 인증하지 않습니다. 루프백 또는 내부 네트워크에만 노출하고, 외부 접속은 gateway 를 거치게 하세요.
+MCP 서버 자체는 인증하지 않습니다. 루프백 또는 내부 네트워크에만 노출하고, 외부 접속은 APISIX 를 거치게 하세요.
 
-### gateway 환경 변수
-
-| 환경 변수 | 기본값 | 설명 |
-|---|---|---|
-| `GATEWAY_HOST` / `GATEWAY_PORT` | `127.0.0.1` / `8080` | 수신 주소 (Docker 이미지: `0.0.0.0`) |
-| `MCP_UPSTREAM` | `http://127.0.0.1:5100` | MCP 서버 |
-| `DASHBOARD_UPSTREAM` | `http://127.0.0.1:3000` | 대시보드 |
-| `GATEWAY_DATA_DIR` | `./data` | Deno KV 저장 폴더 (Docker: `/data` 볼륨) |
-| `MCP_ALLOWED_ORIGINS` | (localhost 만) | 허용할 브라우저 Origin |
-| `LOG_RETENTION_DAYS` | `7` | 로그·지표 보존 기간 |
-| `MAX_BODY_BYTES` | `10485760` | MCP 요청 본문 최대 크기 |
-| `HEALTH_INTERVAL_SECONDS` | `15` | 업스트림 상태 확인 주기 |
+대시보드 서버 환경 변수(`APISIX_ADMIN_URL`, `LOKI_URL`, `MCP_URL`, `DASHBOARD_UPSTREAM`, `DATA_DIR`, `LOG_RETENTION_DAYS`)는
+[dashboard/server/utils/env.ts](dashboard/server/utils/env.ts) 를 참고하세요. 화면만 고칠 때는 `cd dashboard && deno task dev` 로 띄울 수 있지만,
+관리 API 는 APISIX·Loki 가 필요하므로 전체 동작은 Docker 구성에서 확인하세요.
 
 ## Claude 에 연결
 
@@ -200,14 +199,7 @@ claude mcp add --transport http gemini https://127.0.0.1:5100/mcp --header "Auth
 
 ## 검증
 
-**gateway** (Deno 테스트, 가짜 MCP 서버·메모리 KV): 관리자 설정 코드·로그인·잠금, CSRF 차단, 키 발급/비활성/재발급/삭제/만료,
-도구 권한, Origin 검사, 로그·지표 집계, 업스트림 상태, 라우팅.
-
-```bash
-cd gateway && deno task test
-```
-
-**대시보드**: `cd dashboard && deno task typecheck` (vue-tsc).
+**대시보드**: `cd dashboard && deno task typecheck` (vue-tsc, 화면과 서버).
 
 **MCP 서버**: xUnit v3 (Microsoft.Testing.Platform) 테스트가 **AOT 로 게시된 `publish\win-x64\GeminiMcp.exe` 를 직접 띄워**
 공식 MCP C# 클라이언트로 검증합니다. 먼저 `scripts\publish-aot.ps1` 로 게시하세요.
@@ -219,14 +211,14 @@ dotnet test --project tests/GeminiMcp.Tests --filter-not-trait "Category=Live" #
 
 | 테스트 클래스 | 내용 |
 |---|---|
-| `HttpEndpointTests` | `/health`, `/skill`, 외부 Origin 403, localhost Origin 허용, (gateway 경유 시) 키 없음·잘못된 키 401 |
+| `HttpEndpointTests` | `/health`, `/skill`, 외부 Origin 403, localhost Origin 허용, (APISIX 경유 시) 키 없음·잘못된 키 401 |
 | `McpProtocolTests` | initialize(서버 정보·instructions·capabilities), 구버전 프로토콜(2025-03-26/06-18/11-25) 협상, 도구 목록·스키마, 스킬 프롬프트·리소스, 도구 오류(isError) |
 | `GeminiToolTests` (Live) | 9개 도구 실호출: 검색 출처, JSON Schema, Python 실행, 이미지 생성→재인식, TTS→받아쓰기, YouTube |
 | `FilesApiUploadTests` (Live) | 인라인 한도를 넘는 파일이 Files API 업로드 경로로 처리되는지 |
 
 - `GEMINI_API_KEY` 가 없으면 Live 테스트는 건너뜁니다 (Windows 에서는 사용자 환경 변수도 읽음).
 - 다른 실행 파일을 검증하려면 `GEMINI_MCP_EXE` 환경 변수로 경로를 지정합니다.
-- **실행 중인 배포(gateway 경유) 검증**: `GEMINI_MCP_URL` 을 지정하면 프로세스를 띄우지 않고 그 서버를 테스트합니다.
+- **실행 중인 배포(APISIX 경유) 검증**: `GEMINI_MCP_URL` 을 지정하면 프로세스를 띄우지 않고 그 서버를 테스트합니다.
   이미지·음성 테스트가 호스트 경로로 파일을 주고받으므로 경로 매핑까지 검증됩니다.
   (`FilesApiUploadTests` 는 서버 설정을 바꿔야 하므로 항상 로컬 AOT 바이너리로 실행합니다.)
 
@@ -248,29 +240,27 @@ src/GeminiMcp/                MCP 서버 (.NET 10 Native AOT)
   Gemini/                     Gemini REST(v1beta) 클라이언트, 미디어 변환, 응답 파싱, 출력 파일
   Tools/GeminiTools.cs        MCP 도구 9종
   Skill/                      내장 스킬 (SKILL.md + 리소스/프롬프트/설치)
-gateway/                      gateway (Deno + TypeScript)
-  main.ts                     진입점 (--reset-admin)
-  src/app.ts                  라우팅 (/mcp, /skill, /health, /api/admin, 대시보드)
-  src/mcp.ts                  MCP 프록시: Origin·API 키·도구 권한 검사, 응답 스트림 관찰, 로그·지표 기록
-  src/api.ts                  관리 API (인증, 키, 로그·SSE, 지표, 상태, 도구 목록)
-  src/auth.ts                 관리자 설정 코드·비밀번호(PBKDF2)·세션
-  src/keys.ts | logs.ts | metrics.ts | upstream.ts   키 저장소, 로그, 분 단위 지표, 상태 확인
-  gateway_test.ts             테스트
-  Dockerfile                  Deno distroless 이미지
 dashboard/                    대시보드 (Nuxt 4 + Vuetify 4 + TypeScript, Deno)
   app/pages/                  index(모니터링), logs, keys, settings, login
   app/components/             TimeSeriesChart(SVG), StatTile
   app/plugins/vuetify.ts      Material Design 테마(라이트/다크)
+  server/api/admin/           관리 API (인증, 키, 로그, 지표, 상태, 도구 목록)
+  server/utils/apisix.ts      APISIX Admin API: 라우트 등록, API 키(컨슈머·credential), 허용 목록 동기화
+  server/utils/loki.ts        Loki: 로그 조회, LogQL 지표, 관리/시스템 로그 기록
+  server/utils/auth.ts        관리자 설정 코드·비밀번호(PBKDF2)·세션
+  server/plugins/bootstrap.ts 시작 시 라우트 등록, 만료 키 동기화, 상태 확인
   Dockerfile                  Nitro deno-server 빌드 → Deno distroless 이미지
 scripts/publish-aot.ps1       Native AOT 게시
 docker/
   docker.ps1 | docker.sh      Docker self-hosting (setup/up/down/restart/rebuild/logs/status/cert/reset-admin)
   Dockerfile                  MCP 서버: AOT 빌드 → chiseled 런타임 이미지 (빌드 컨텍스트: 저장소 루트)
   Dockerfile.dockerignore     빌드 컨텍스트 제외 목록
-  docker-compose.yml          MCP 서버 + gateway + 대시보드 + Caddy
-  Caddyfile                   TLS 종단 + zstd/gzip 압축 리버스 프록시 → gateway
+  docker-compose.yml          MCP 서버 + APISIX + etcd + Loki + 대시보드 + Caddy
+  apisix/config.yaml          APISIX 설정 (Admin API 는 control 네트워크 전용, 사용 플러그인)
+  loki/loki.yaml              Loki 단일 프로세스 설정 (파일시스템, 보존 기간)
+  Caddyfile                   TLS 종단 + zstd/gzip 압축 리버스 프록시 → APISIX
   .env.example                Docker 설정 예시
-tests/GeminiMcp.Tests/        xUnit v3 E2E 테스트 (AOT 바이너리 또는 gateway 경유 배포 대상)
+tests/GeminiMcp.Tests/        xUnit v3 E2E 테스트 (AOT 바이너리 또는 APISIX 경유 배포 대상)
 ```
 
 MCP 프로토콜은 공식 [ModelContextProtocol C# SDK](https://github.com/modelcontextprotocol/csharp-sdk) 2.3.0 (stateless Streamable HTTP)을 사용하며,
