@@ -13,7 +13,8 @@ public sealed class McpProtocolTests(DefaultServer server) : IAsyncLifetime
     private static readonly string[] ExpectedTools =
     [
         "gemini_ask", "gemini_web_search", "gemini_read_urls", "gemini_analyze_media", "gemini_run_code",
-        "gemini_generate_image", "gemini_text_to_speech", "gemini_list_models", "gemini_usage_guide",
+        "gemini_generate_image", "gemini_generate_video", "gemini_text_to_speech", "gemini_list_models",
+        "gemini_select_model", "gemini_usage_guide",
     ];
 
     private McpClient _client = null!;
@@ -68,6 +69,48 @@ public sealed class McpProtocolTests(DefaultServer server) : IAsyncLifetime
 
         Assert.True(tools["gemini_web_search"].ProtocolTool.Annotations?.ReadOnlyHint);
         Assert.False(tools["gemini_generate_image"].ProtocolTool.Annotations?.DestructiveHint);
+
+        var video = tools["gemini_generate_video"].JsonSchema;
+        Assert.Equal(["prompt"], video.GetProperty("required").EnumerateArray().Select(e => e.GetString()));
+        // 선택 인수(string[]?)는 type 이 ["array", "null"] 로 표현됩니다.
+        Assert.Contains("array", video.GetProperty("properties").GetProperty("input_images").GetProperty("type").EnumerateArray().Select(e => e.GetString()));
+
+        var select = tools["gemini_select_model"].JsonSchema;
+        Assert.Equal(["category", "model"], select.GetProperty("required").EnumerateArray().Select(e => e.GetString()).Order());
+    }
+
+    [Fact]
+    public async Task SelectModel_SetsAndResetsCategory()
+    {
+        try
+        {
+            var set = await _client.CallOkAsync("gemini_select_model", new()
+            {
+                ["category"] = "tts",
+                ["model"] = "models/test-tts-model",
+                ["skip_validation"] = true,
+            });
+            Assert.Contains("- tts: test-tts-model\n", set.Text());
+        }
+        finally
+        {
+            var reset = await _client.CallOkAsync("gemini_select_model", new() { ["category"] = "tts", ["model"] = "default" });
+            Assert.Contains("- tts: gemini-2.5-flash-preview-tts (기본값)", reset.Text());
+        }
+    }
+
+    [Fact]
+    public async Task SelectModel_UnknownCategory_ReturnsToolError()
+    {
+        var result = await _client.CallToolAsync("gemini_select_model", new Dictionary<string, object?>
+        {
+            ["category"] = "music",
+            ["model"] = "x",
+            ["skip_validation"] = true,
+        }, cancellationToken: Ct);
+
+        Assert.True(result.IsError);
+        Assert.Contains("알 수 없는 category", result.Text());
     }
 
     [Fact]

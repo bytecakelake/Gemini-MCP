@@ -15,8 +15,9 @@ public static class SkillContent
         Gemini MCP: Claude 가 할 수 없거나 약한 작업을 Google Gemini 에 위임합니다.
         - 최신 정보: gemini_web_search / 웹 페이지 읽기: gemini_read_urls
         - 영상·오디오·YouTube 분석/전사: gemini_analyze_media
-        - 이미지 생성·편집: gemini_generate_image / 음성 합성: gemini_text_to_speech
+        - 이미지 생성·편집: gemini_generate_image / 영상 생성·편집: gemini_generate_video / 음성 합성: gemini_text_to_speech
         - Python 샌드박스 실행: gemini_run_code / 세컨드 오피니언·대용량 분석: gemini_ask
+        - 모델 확인·변경: gemini_list_models 로 용도별 목록을 보고 gemini_select_model 로 선택 (환경 변수 아님)
         파일 경로는 서버 PC 기준 절대 경로. 자세한 사용법은 gemini_usage_guide 도구,
         'gemini_skill' 프롬프트 또는 gemini://skill/SKILL.md 리소스를 참고하세요.
         """;

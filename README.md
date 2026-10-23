@@ -32,8 +32,24 @@ dashboard ─(Admin API)─▶ APISIX ─▶ etcd (라우트·API 키)
 | `gemini_text_to_speech` | 음성 합성 → WAV 저장 |
 | `gemini_run_code` | Gemini Python 샌드박스 코드 실행 |
 | `gemini_ask` | 세컨드 오피니언, 대용량 컨텍스트 분석, JSON Schema 구조화 출력 |
-| `gemini_list_models` | 사용 가능한 모델 목록 |
+| `gemini_generate_video` | 영상 생성/편집/연장 (Gemini Omni) → MP4 저장 |
+| `gemini_list_models` | 사용 가능한 모델을 용도(text/pro/image/tts/video)별로 표시, 현재 선택 표시 |
+| `gemini_select_model` | 용도별 기본 모델 선택 (서버 전역, 재시작 후에도 유지) |
 | `gemini_usage_guide` | 내장 스킬(사용 설명서) 반환 |
+
+### 모델 선택
+
+모델은 환경 변수로 정하지 않고 에이전트가 직접 고릅니다. `gemini_list_models` 가 API 키로 쓸 수 있는 모델을 용도별로 보여주고(★ = 현재 선택),
+`gemini_select_model { category, model }` 로 용도별 기본 모델을 바꿉니다(`model: "default"` 로 초기화). 선택은 서버 전역이며
+출력 폴더의 `.gemini-mcp-models.json` 에 저장되어 재시작 후에도 유지됩니다. 한 번만 다른 모델을 쓰려면 각 도구의 `model` 인수를 넘기면 됩니다.
+
+| category | 쓰는 도구 | 내장 기본값 |
+|---|---|---|
+| `text` | ask, web_search, read_urls, analyze_media, run_code | `gemini-flash-latest` |
+| `pro` | 위 도구에서 `model: "pro"` | `gemini-pro-latest` |
+| `image` | generate_image | `gemini-3.1-flash-image` |
+| `tts` | text_to_speech | `gemini-2.5-flash-preview-tts` |
+| `video` | generate_video | `gemini-omni-1.1-flash` |
 
 ## 내장 스킬
 
@@ -159,10 +175,6 @@ $env:GEMINI_API_KEY = "<your key>"
 | 환경 변수 | 기본값 | 설명 |
 |---|---|---|
 | `GEMINI_API_KEY` | (필수) | `GOOGLE_API_KEY` 도 인식 |
-| `GEMINI_MODEL` | `gemini-flash-latest` | 기본 텍스트 모델 |
-| `GEMINI_PRO_MODEL` | `gemini-pro-latest` | `model: "pro"` 별칭 |
-| `GEMINI_IMAGE_MODEL` | `gemini-3.1-flash-image` | 이미지 생성 모델 |
-| `GEMINI_TTS_MODEL` | `gemini-2.5-flash-preview-tts` | 음성 합성 모델 |
 | `GEMINI_MCP_OUTPUT_DIR` | `~/gemini-mcp-output` | 생성 파일 저장 폴더 |
 | `GEMINI_INLINE_LIMIT_BYTES` | `15728640` | 이보다 큰 파일은 Files API 로 업로드 |
 | `MCP_ALLOWED_ORIGINS` | (localhost 만) | 허용할 브라우저 Origin, 쉼표 구분 |

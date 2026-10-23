@@ -15,7 +15,7 @@ namespace GeminiMcp.Tools;
 /// 대용량 컨텍스트 분석, 다른 모델의 의견)을 Gemini 에 위임하는 MCP 도구 모음.
 /// </summary>
 [McpServerToolType]
-public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, GeminiOptions options)
+public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, ModelCatalog catalog, GeminiOptions options)
 {
     [McpServerTool(Name = "gemini_ask", Title = "Ask Gemini", ReadOnly = true, OpenWorld = true)]
     [Description("""
@@ -26,7 +26,7 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, Gemini
         [Description("Gemini 에게 보낼 질문/지시문")] string prompt,
         [Description("첨부할 파일들: 서버 PC 의 절대 경로, http(s) URL, YouTube URL")] string[]? files = null,
         [Description("시스템 지시문(역할, 말투, 규칙)")] string? system_instruction = null,
-        [Description("모델 이름 또는 별칭 'flash'(기본)/'pro'. 예: gemini-3.1-pro-preview")] string? model = null,
+        [Description("모델 이름 또는 용도 별칭 'flash'/'pro'. 생략 시 gemini_select_model 로 선택된 text 모델. 예: gemini-3.1-pro-preview")] string? model = null,
         [Description("0.0~2.0 샘플링 온도")] double? temperature = null,
         [Description("최대 출력 토큰 수")] int? max_output_tokens = null,
         [Description("JSON Schema 문자열. 지정하면 이 스키마를 따르는 JSON 으로만 응답합니다")] string? json_schema = null,
@@ -41,7 +41,7 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, Gemini
             config["responseJsonSchema"] = ParseJson(json_schema, nameof(json_schema));
         }
 
-        var resolved = options.ResolveModel(model);
+        var resolved = catalog.Resolve(model, ModelCatalog.Text);
         var response = await gemini.GenerateContentAsync(resolved, request, cancellationToken);
         return GeminiResponse.Parse(resolved, response).ToToolText();
     }
@@ -54,13 +54,13 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, Gemini
     public async Task<string> WebSearchAsync(
         [Description("검색/조사할 질문")] string query,
         [Description("답변 형식이나 관점에 대한 추가 지시")] string? instructions = null,
-        [Description("모델 이름 또는 별칭 'flash'(기본)/'pro'")] string? model = null,
+        [Description("모델 이름 또는 용도 별칭 'flash'/'pro'. 생략 시 gemini_select_model 로 선택된 text 모델")] string? model = null,
         CancellationToken cancellationToken = default)
     {
         var request = NewRequest(new JsonArray(TextPart(query)), instructions);
         request["tools"] = new JsonArray(new JsonObject { ["google_search"] = new JsonObject() });
 
-        var resolved = options.ResolveModel(model);
+        var resolved = catalog.Resolve(model, ModelCatalog.Text);
         var response = await gemini.GenerateContentAsync(resolved, request, cancellationToken);
         return GeminiResponse.Parse(resolved, response).ToToolText();
     }
@@ -74,7 +74,7 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, Gemini
         [Description("읽을 URL 목록 (최대 20개)")] string[] urls,
         [Description("URL 내용에 대해 수행할 작업/질문")] string prompt,
         [Description("true 면 Google 검색 그라운딩도 함께 사용")] bool also_search = false,
-        [Description("모델 이름 또는 별칭 'flash'(기본)/'pro'")] string? model = null,
+        [Description("모델 이름 또는 용도 별칭 'flash'/'pro'. 생략 시 gemini_select_model 로 선택된 text 모델")] string? model = null,
         CancellationToken cancellationToken = default)
     {
         if (urls is not { Length: > 0 })
@@ -92,7 +92,7 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, Gemini
             tools.Add((JsonNode)new JsonObject { ["google_search"] = new JsonObject() });
         request["tools"] = tools;
 
-        var resolved = options.ResolveModel(model);
+        var resolved = catalog.Resolve(model, ModelCatalog.Text);
         var response = await gemini.GenerateContentAsync(resolved, request, cancellationToken);
         return GeminiResponse.Parse(resolved, response).ToToolText();
     }
@@ -106,7 +106,7 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, Gemini
     public async Task<string> AnalyzeMediaAsync(
         [Description("분석할 미디어: 서버 PC 의 절대 경로, http(s) URL, YouTube URL")] string[] files,
         [Description("수행할 작업. 예: '타임스탬프와 함께 요약', '화자 구분하여 전사'")] string prompt,
-        [Description("모델 이름 또는 별칭 'flash'(기본)/'pro'")] string? model = null,
+        [Description("모델 이름 또는 용도 별칭 'flash'/'pro'. 생략 시 gemini_select_model 로 선택된 text 모델")] string? model = null,
         CancellationToken cancellationToken = default)
     {
         if (files is not { Length: > 0 })
@@ -114,7 +114,7 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, Gemini
 
         // Gemini 는 미디어를 텍스트 앞에 둘 때 결과가 더 좋습니다.
         var parts = await BuildPartsAsync(prompt, files, cancellationToken);
-        var resolved = options.ResolveModel(model);
+        var resolved = catalog.Resolve(model, ModelCatalog.Text);
         var response = await gemini.GenerateContentAsync(resolved, NewRequest(parts, null), cancellationToken);
         return GeminiResponse.Parse(resolved, response).ToToolText();
     }
@@ -127,14 +127,14 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, Gemini
     public async Task<string> RunCodeAsync(
         [Description("코드를 작성·실행해 해결할 작업")] string task,
         [Description("함께 제공할 데이터 파일 (경로/URL)")] string[]? files = null,
-        [Description("모델 이름 또는 별칭 'flash'(기본)/'pro'")] string? model = null,
+        [Description("모델 이름 또는 용도 별칭 'flash'/'pro'. 생략 시 gemini_select_model 로 선택된 text 모델")] string? model = null,
         CancellationToken cancellationToken = default)
     {
         var parts = await BuildPartsAsync(task, files, cancellationToken);
         var request = NewRequest(parts, null);
         request["tools"] = new JsonArray(new JsonObject { ["code_execution"] = new JsonObject() });
 
-        var resolved = options.ResolveModel(model);
+        var resolved = catalog.Resolve(model, ModelCatalog.Text);
         var response = await gemini.GenerateContentAsync(resolved, request, cancellationToken);
         return GeminiResponse.Parse(resolved, response).ToToolText();
     }
@@ -151,7 +151,7 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, Gemini
         [Description("해상도: 1K, 2K, 4K (지원 모델에서만)")] string? image_size = null,
         [Description("저장 경로(파일 또는 폴더). 생략 시 기본 출력 폴더")] string? output_path = null,
         [Description("true 면 생성된 이미지를 응답에 포함 (토큰 사용 증가)")] bool return_image = false,
-        [Description("이미지 모델 이름. 생략 시 서버 기본값")] string? model = null,
+        [Description("이미지 모델 이름. 생략 시 선택된 image 모델")] string? model = null,
         CancellationToken cancellationToken = default)
     {
         var parts = await BuildPartsAsync(prompt, input_images, cancellationToken);
@@ -168,7 +168,7 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, Gemini
             config["imageConfig"] = imageConfig;
         }
 
-        var resolved = string.IsNullOrWhiteSpace(model) ? options.ImageModel : options.ResolveModel(model);
+        var resolved = catalog.Resolve(model, ModelCatalog.Image);
         var response = GeminiResponse.Parse(resolved, await gemini.GenerateContentAsync(resolved, request, cancellationToken));
 
         var images = response.Blobs.Where(b => b.MimeType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)).ToList();
@@ -204,7 +204,7 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, Gemini
         [Description("음성 이름: Kore, Puck, Charon, Fenrir, Aoede, Leda, Orus, Zephyr 등 (기본 Kore)")] string? voice = null,
         [Description("말투/감정/속도 지시")] string? style = null,
         [Description("저장 경로(파일 또는 폴더). 생략 시 기본 출력 폴더")] string? output_path = null,
-        [Description("TTS 모델 이름. 생략 시 서버 기본값")] string? model = null,
+        [Description("TTS 모델 이름. 생략 시 선택된 tts 모델")] string? model = null,
         CancellationToken cancellationToken = default)
     {
         var spoken = string.IsNullOrWhiteSpace(style) ? text : $"{style.Trim()}:\n{text}";
@@ -219,7 +219,7 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, Gemini
             },
         };
 
-        var resolved = string.IsNullOrWhiteSpace(model) ? options.TtsModel : options.ResolveModel(model);
+        var resolved = catalog.Resolve(model, ModelCatalog.Tts);
         var response = GeminiResponse.Parse(resolved, await gemini.GenerateContentAsync(resolved, request, cancellationToken));
         var audio = response.Blobs.FirstOrDefault(b => b.MimeType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase));
         if (audio.Data is null)
@@ -234,27 +234,206 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, Gemini
         return $"음성을 저장했습니다: {options.Paths.ToHost(path)} ({bytes.Length:N0} bytes{(seconds is null ? "" : $", 약 {seconds:F1}초")})\n[gemini model={response.Model}]";
     }
 
-    [McpServerTool(Name = "gemini_list_models", Title = "List Gemini models", ReadOnly = true, Idempotent = true, OpenWorld = true)]
-    [Description("현재 API 키로 사용 가능한 Gemini 모델 목록과 서버의 기본 모델 설정을 보여줍니다. filter 로 이름을 걸러낼 수 있습니다.")]
-    public async Task<string> ListModelsAsync(
-        [Description("모델 이름에 포함될 문자열 (예: 'pro', 'image', 'tts')")] string? filter = null,
+    [McpServerTool(Name = "gemini_generate_video", Title = "Generate / edit video", Destructive = false, OpenWorld = true)]
+    [Description("""
+        Gemini 영상 모델(기본 gemini-omni-1.1-flash)로 텍스트·이미지에서 영상(MP4, 오디오 포함)을 생성하거나,
+        input_video 또는 previous_interaction_id 로 기존 영상을 편집/연장합니다. 생성에는 수 분이 걸릴 수 있습니다.
+        결과는 파일로 저장되고 경로와 interaction_id 를 반환합니다. 이어서 수정하려면 그 id 를 previous_interaction_id 로 넘기세요.
+        """)]
+    public async Task<string> GenerateVideoAsync(
+        [Description("영상 지시문: 피사체, 동작, 카메라 움직임, 스타일, 대사/소리. 넣지 말아야 할 것도 문장으로 적습니다")] string prompt,
+        [Description("시작 프레임/참조용 이미지 경로 또는 URL")] string[]? input_images = null,
+        [Description("편집/연장할 영상 경로 또는 URL (업로드 영상은 10초 이하)")] string? input_video = null,
+        [Description("이전 gemini_generate_video 결과의 interaction_id. 그 영상을 이어서 편집/연장합니다")] string? previous_interaction_id = null,
+        [Description("작업 유형 힌트: text_to_video, image_to_video, reference_to_video, edit, extend (보통 생략)")] string? task = null,
+        [Description("가로세로 비율: 16:9(기본) 또는 9:16")] string? aspect_ratio = null,
+        [Description("해상도: 360p, 720p(기본), 1080p, 4k")] string? resolution = null,
+        [Description("저장 경로(파일 또는 폴더). 생략 시 기본 출력 폴더")] string? output_path = null,
+        [Description("영상 모델 이름. 생략 시 선택된 video 모델")] string? model = null,
         CancellationToken cancellationToken = default)
     {
-        var list = await gemini.ListModelsAsync(cancellationToken);
-        var sb = new StringBuilder();
-        sb.Append($"기본값 — text(flash): {options.TextModel}, pro: {options.ProModel}, image: {options.ImageModel}, tts: {options.TtsModel}\n\n");
+        var content = new JsonArray();
+        foreach (var image in input_images ?? [])
+        {
+            if (!string.IsNullOrWhiteSpace(image))
+                content.Add((JsonNode)await media.ToInteractionContentAsync(image, cancellationToken));
+        }
+        if (!string.IsNullOrWhiteSpace(input_video))
+            content.Add((JsonNode)await media.ToInteractionContentAsync(input_video, cancellationToken));
+        content.Add((JsonNode)new JsonObject { ["type"] = "text", ["text"] = prompt });
 
+        var resolved = catalog.Resolve(model, ModelCatalog.Video);
+        var responseFormat = new JsonObject { ["type"] = "video", ["delivery"] = "uri" };
+        if (!string.IsNullOrWhiteSpace(aspect_ratio))
+            responseFormat["aspect_ratio"] = aspect_ratio.Trim();
+        if (!string.IsNullOrWhiteSpace(resolution))
+            responseFormat["resolution"] = resolution.Trim().ToLowerInvariant();
+
+        var request = new JsonObject
+        {
+            ["model"] = resolved,
+            ["input"] = content.Count == 1 ? JsonValue.Create(prompt) : content,
+            ["response_format"] = responseFormat,
+        };
+        if (!string.IsNullOrWhiteSpace(previous_interaction_id))
+            request["previous_interaction_id"] = previous_interaction_id.Trim();
+        if (!string.IsNullOrWhiteSpace(task))
+            request["generation_config"] = new JsonObject { ["video_config"] = new JsonObject { ["task"] = task.Trim().ToLowerInvariant() } };
+
+        var interaction = await gemini.CreateInteractionAsync(request, cancellationToken);
+        var id = interaction["id"]?.GetValue<string>();
+
+        // 보통 생성 응답에 결과가 바로 들어오지만, 진행 중 상태로 오면 완료될 때까지 기다립니다.
+        var deadline = DateTime.UtcNow.Add(options.RequestTimeout);
+        while (interaction["status"]?.GetValue<string>() is "in_progress" or "queued" or "pending" && id is not null)
+        {
+            if (DateTime.UtcNow > deadline)
+                throw new McpException($"영상 생성 대기 시간 초과 (interaction_id={id}).");
+            await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);
+            interaction = await gemini.GetInteractionAsync(id, cancellationToken);
+        }
+
+        if (interaction["status"]?.GetValue<string>() is "failed" or "cancelled" or "incomplete")
+            throw new McpException($"영상 생성 실패 ({interaction["status"]}): {interaction["error"]?["message"]?.GetValue<string>() ?? interaction["error"]?.ToJsonString() ?? "원인 미상"}");
+
+        var outputs = (interaction["steps"] as JsonArray ?? new JsonArray())
+            .OfType<JsonObject>()
+            .Where(s => s["type"]?.GetValue<string>() == "model_output")
+            .SelectMany(s => (s["content"] as JsonArray ?? new JsonArray()).OfType<JsonObject>())
+            .ToList();
+        var video = outputs.FirstOrDefault(c => c["type"]?.GetValue<string>() == "video");
+        var comment = string.Join("\n", outputs.Where(c => c["type"]?.GetValue<string>() == "text").Select(c => c["text"]?.GetValue<string>()));
+        if (video is null)
+            throw new McpException($"영상이 생성되지 않았습니다. 모델 응답: {(comment.Length > 0 ? comment : "(없음)")}");
+
+        var mime = video["mime_type"]?.GetValue<string>() ?? "video/mp4";
+        var bytes = video["data"]?.GetValue<string>() is { } data
+            ? Convert.FromBase64String(data)
+            : await gemini.DownloadGeneratedFileAsync(
+                video["uri"]?.GetValue<string>() ?? throw new McpException("영상 응답에 data 와 uri 가 모두 없습니다."), cancellationToken);
+
+        var path = OutputFiles.Resolve(options, output_path, "gemini-video", MimeTypes.ToExtension(mime));
+        await File.WriteAllBytesAsync(path, bytes, cancellationToken);
+
+        var sb = new StringBuilder($"영상을 저장했습니다: {options.Paths.ToHost(path)} ({mime}, {bytes.Length:N0} bytes)\n");
+        if (id is not null)
+            sb.Append($"interaction_id: {id} (previous_interaction_id 로 넘기면 이 영상을 이어서 편집/연장합니다)\n");
+        if (comment.Length > 0)
+            sb.Append($"\n모델 코멘트: {comment}\n");
+        sb.Append($"\n[gemini model={interaction["model"]?.GetValue<string>() ?? resolved}]");
+        return sb.ToString();
+    }
+
+    [McpServerTool(Name = "gemini_list_models", Title = "List Gemini models", ReadOnly = true, Idempotent = true, OpenWorld = true)]
+    [Description("""
+        현재 API 키로 사용 가능한 Gemini 모델을 용도(category: text, pro, image, tts, video)별로 보여주고,
+        각 용도에 지금 선택된 모델을 표시합니다. 모델을 바꾸려면 이 목록에서 고른 이름으로 gemini_select_model 을 호출하세요.
+        """)]
+    public async Task<string> ListModelsAsync(
+        [Description("이 용도의 모델만 표시: text, pro, image, tts, video")] string? category = null,
+        [Description("모델 이름에 포함될 문자열 (예: '3.1', 'preview')")] string? filter = null,
+        [Description("true 면 어떤 용도에도 해당하지 않는 모델(임베딩 등)도 표시")] bool include_other = false,
+        CancellationToken cancellationToken = default)
+    {
+        var only = string.IsNullOrWhiteSpace(category) ? null : ModelCatalog.NormalizeCategory(category);
+        var list = await gemini.ListModelsAsync(cancellationToken);
+        var sb = new StringBuilder(SelectionTable());
+
+        var groups = new Dictionary<string, List<string>>();
         foreach (var node in list["models"] as JsonArray ?? new JsonArray())
         {
             if (node is not JsonObject m)
                 continue;
-            var name = m["name"]?.GetValue<string>()?.Replace("models/", "") ?? "";
+            var name = ModelCatalog.StripPrefix(m["name"]?.GetValue<string>() ?? "");
             if (!string.IsNullOrEmpty(filter) && !name.Contains(filter, StringComparison.OrdinalIgnoreCase))
                 continue;
-            var methods = string.Join(",", (m["supportedGenerationMethods"] as JsonArray ?? new JsonArray()).Select(x => x?.GetValue<string>()));
-            sb.Append($"- {name}  in={m["inputTokenLimit"]} out={m["outputTokenLimit"]}  [{methods}]\n");
+            var group = ModelCatalog.Classify(m) ?? "other";
+            // pro 모델은 text 용도로도 쓸 수 있으므로 두 그룹 모두에 보입니다.
+            var targets = group == ModelCatalog.Pro ? new[] { ModelCatalog.Pro, ModelCatalog.Text } : [group];
+            foreach (var target in targets)
+            {
+                if ((only is not null && target != only) || (target == "other" && !include_other))
+                    continue;
+                var selected = only is null && target != "other" && catalog.Get(target) == name ? " ★" : "";
+                var title = m["displayName"]?.GetValue<string>();
+                var methods = string.Join(",", (m["supportedGenerationMethods"] as JsonArray ?? new JsonArray()).Select(x => x?.GetValue<string>()));
+                var line = $"- {name}{selected}{(title is null ? "" : $" — {title}")}  in={m["inputTokenLimit"]} out={m["outputTokenLimit"]} [{methods}]";
+                if (!groups.TryGetValue(target, out var lines))
+                    groups[target] = lines = [];
+                lines.Add(line);
+            }
         }
 
+        foreach (var group in ModelCatalog.Categories.Append("other"))
+        {
+            if (!groups.TryGetValue(group, out var lines))
+                continue;
+            sb.Append($"\n## {group}\n");
+            foreach (var line in lines)
+                sb.Append(line).Append('\n');
+        }
+
+        if (groups.Count == 0)
+            sb.Append("\n(조건에 맞는 모델이 없습니다)\n");
+        sb.Append("\n★ = 현재 선택. 목록에 없는 모델도 이름을 알면 gemini_select_model 이나 각 도구의 model 인수로 지정할 수 있습니다.\n");
+        return sb.ToString();
+    }
+
+    [McpServerTool(Name = "gemini_select_model", Title = "Select Gemini model", Destructive = false, Idempotent = true, OpenWorld = true)]
+    [Description("""
+        용도(category)별 기본 모델을 선택합니다. 이후 해당 도구에서 model 인수를 생략하면 이 모델을 씁니다.
+        category: text(gemini_ask/web_search/read_urls/analyze_media/run_code 기본), pro(model:'pro' 별칭), image, tts, video.
+        model 은 gemini_list_models 에 나온 이름이며, 'default' 를 주면 내장 기본값으로 되돌립니다.
+        선택은 서버 전역(모든 클라이언트 공통)이고 서버 재시작 후에도 유지됩니다.
+        """)]
+    public async Task<string> SelectModelAsync(
+        [Description("용도: text, pro, image, tts, video")] string category,
+        [Description("모델 이름 (예: gemini-3.1-pro-preview). 'default' 면 기본값으로 초기화")] string model,
+        [Description("true 면 모델 목록에 없는 이름이어도 확인 없이 선택")] bool skip_validation = false,
+        CancellationToken cancellationToken = default)
+    {
+        var key = ModelCatalog.NormalizeCategory(category);
+        if (string.IsNullOrWhiteSpace(model))
+            throw new McpException("model 이 비어 있습니다. gemini_list_models 로 이름을 확인하세요.");
+
+        if (model.Trim().Equals("default", StringComparison.OrdinalIgnoreCase))
+        {
+            catalog.Set(key, null);
+            return $"{key} 모델을 기본값({ModelCatalog.Defaults[key]})으로 되돌렸습니다.\n\n{SelectionTable()}";
+        }
+
+        var name = ModelCatalog.StripPrefix(model);
+        var note = "";
+        if (!skip_validation)
+        {
+            var list = await gemini.ListModelsAsync(cancellationToken);
+            var match = (list["models"] as JsonArray ?? new JsonArray()).OfType<JsonObject>()
+                .FirstOrDefault(m => ModelCatalog.StripPrefix(m["name"]?.GetValue<string>() ?? "") == name);
+            if (match is null)
+            {
+                var similar = (list["models"] as JsonArray ?? new JsonArray()).OfType<JsonObject>()
+                    .Where(m => ModelCatalog.Classify(m) is { } c && (c == key || (key == ModelCatalog.Text && c == ModelCatalog.Pro)))
+                    .Select(m => ModelCatalog.StripPrefix(m["name"]!.GetValue<string>()))
+                    .Take(15);
+                throw new McpException(
+                    $"'{name}' 모델을 현재 API 키의 모델 목록에서 찾을 수 없습니다. {key} 용도 후보: {string.Join(", ", similar)}\n" +
+                    "그래도 쓰려면 skip_validation=true 로 다시 호출하세요.");
+            }
+
+            var actual = ModelCatalog.Classify(match);
+            if (actual != key && !(key == ModelCatalog.Text && actual == ModelCatalog.Pro) && !(key == ModelCatalog.Pro && actual == ModelCatalog.Text))
+                note = $"\n주의: 이 모델은 '{actual ?? "other"}' 용도로 보입니다. {key} 도구에서 동작하지 않을 수 있습니다.\n";
+        }
+
+        catalog.Set(key, name);
+        return $"{key} 모델을 {name} 으로 선택했습니다.{note}\n\n{SelectionTable()}";
+    }
+
+    private string SelectionTable()
+    {
+        var sb = new StringBuilder("현재 선택된 모델:\n");
+        foreach (var category in ModelCatalog.Categories)
+            sb.Append($"- {category}: {catalog.Get(category)}{(catalog.IsCustom(category) ? "" : " (기본값)")}\n");
         return sb.ToString();
     }
 

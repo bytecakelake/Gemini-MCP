@@ -17,14 +17,13 @@ if (args.Contains("--help") || args.Contains("-h"))
 
         환경 변수:
           GEMINI_API_KEY          Gemini API 키 (필수, GOOGLE_API_KEY 도 인식)
-          GEMINI_MODEL            기본 텍스트 모델        (기본: gemini-flash-latest)
-          GEMINI_PRO_MODEL        model:"pro" 별칭 모델    (기본: gemini-pro-latest)
-          GEMINI_IMAGE_MODEL      이미지 생성 모델         (기본: gemini-3.1-flash-image)
-          GEMINI_TTS_MODEL        음성 합성 모델           (기본: gemini-2.5-flash-preview-tts)
           GEMINI_MCP_OUTPUT_DIR   생성 파일 저장 폴더      (기본: ~/gemini-mcp-output)
           MCP_ALLOWED_ORIGINS     허용할 브라우저 Origin (쉼표 구분, 기본은 localhost 만)
           GEMINI_MCP_PATH_MAPS    호스트=컨테이너 경로 매핑 (';' 구분, Docker 실행 시)
           ASPNETCORE_URLS         수신 주소 (기본: http://127.0.0.1:5100)
+
+        모델은 환경 변수가 아니라 MCP 도구로 고릅니다: gemini_list_models 로 목록을 보고 gemini_select_model 로 선택
+        (선택은 출력 폴더의 .gemini-mcp-models.json 에 저장).
 
         인증은 하지 않습니다. 루프백/내부 네트워크에만 노출하고, 외부 접속은 API 게이트웨이(Apache APISIX, API 키 인증)를 거치게 하세요.
 
@@ -69,6 +68,7 @@ builder.Services.AddSingleton(options);
 builder.Services.AddSingleton(_ => new HttpClient { Timeout = options.RequestTimeout });
 builder.Services.AddSingleton<GeminiClient>();
 builder.Services.AddSingleton<MediaResolver>();
+builder.Services.AddSingleton<ModelCatalog>();
 
 // MCP 기본 직렬화 옵션 + 도구 인수 타입(string[] 등)용 소스 생성 컨텍스트 (AOT)
 var toolJson = new JsonSerializerOptions(McpJsonUtilities.DefaultOptions);

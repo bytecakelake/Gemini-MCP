@@ -29,11 +29,56 @@ public sealed class GeminiToolTests(DefaultServer server) : IAsyncLifetime
     }
 
     [Fact]
-    public async Task ListModels_IncludesConfiguredDefaults()
+    public async Task ListModels_GroupsByCategoryAndShowsSelection()
     {
         var text = (await _client.CallOkAsync("gemini_list_models", new() { ["filter"] = "flash" })).Text();
-        Assert.Contains("기본값", text);
+        Assert.Contains("현재 선택된 모델", text);
+        Assert.Contains("- video: ", text);
+        Assert.Contains("## text", text);
         Assert.Contains("flash", text);
+
+        var images = (await _client.CallOkAsync("gemini_list_models", new() { ["category"] = "image" })).Text();
+        Assert.Contains("## image", images);
+        Assert.DoesNotContain("## text", images);
+    }
+
+    [Fact]
+    public async Task SelectModel_RejectsUnknownModel()
+    {
+        var result = await _client.CallToolAsync("gemini_select_model", new Dictionary<string, object?>
+        {
+            ["category"] = "text",
+            ["model"] = "gemini-does-not-exist-123",
+        }, cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.True(result.IsError);
+        Assert.Contains("찾을 수 없습니다", result.Text());
+    }
+
+    /// <summary>영상 생성은 느리고 비용이 커서 GEMINI_MCP_TEST_VIDEO=1 일 때만 실행합니다.</summary>
+    [Fact]
+    public async Task GenerateVideo_SavesMp4()
+    {
+        Assert.SkipUnless(Environment.GetEnvironmentVariable("GEMINI_MCP_TEST_VIDEO") == "1", "Set GEMINI_MCP_TEST_VIDEO=1 to run.");
+        var name = $"video-{Guid.NewGuid():N}.mp4";
+        var text = (await _client.CallOkAsync("gemini_generate_video", new()
+        {
+            ["prompt"] = "A red ball slowly rolling across a wooden table, static camera",
+            ["resolution"] = "360p",
+            ["output_path"] = name,
+        })).Text();
+
+        var path = Path.Combine(server.OutputDirectory, name);
+        try
+        {
+            Assert.Contains("interaction_id", text);
+            var bytes = await File.ReadAllBytesAsync(path, TestContext.Current.CancellationToken);
+            Assert.Equal("ftyp", Encoding.ASCII.GetString(bytes, 4, 4));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 
     [Fact]

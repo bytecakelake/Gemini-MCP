@@ -29,6 +29,32 @@ public sealed class MediaResolver(GeminiClient gemini, HttpClient http, GeminiOp
         return await FromLocalFileAsync(source, ct);
     }
 
+    /// <summary>
+    /// Interactions API 입력 형식({type, data|uri, mime_type})으로 변환합니다. YouTube URL 은 지원하지 않습니다.
+    /// </summary>
+    public async Task<JsonObject> ToInteractionContentAsync(string source, CancellationToken ct)
+    {
+        if (IsYouTube(source.Trim().Trim('"')))
+            throw new McpException("영상 생성 모델 입력으로 YouTube URL 은 지원하지 않습니다. 파일 경로나 직접 다운로드 URL 을 사용하세요.");
+
+        var part = await ToPartAsync(source, ct);
+        var (mimeType, content) = part["inlineData"] is JsonObject inline
+            ? (inline["mimeType"]!.GetValue<string>(), new JsonObject { ["data"] = inline["data"]!.GetValue<string>() })
+            : (part["fileData"]!["mimeType"]?.GetValue<string>() ?? MimeTypes.FromPath(source),
+                new JsonObject { ["uri"] = part["fileData"]!["fileUri"]!.GetValue<string>() });
+
+        var type = mimeType.Split('/')[0] switch
+        {
+            "image" => "image",
+            "video" => "video",
+            "audio" => "audio",
+            _ => throw new McpException($"영상 생성 입력으로 쓸 수 없는 형식입니다 ({mimeType}): {source}"),
+        };
+        content["type"] = type;
+        content["mime_type"] = mimeType;
+        return content;
+    }
+
     private async Task<JsonObject> FromLocalFileAsync(string path, CancellationToken ct)
     {
         var fullPath = Path.GetFullPath(options.Paths.ToLocal(Environment.ExpandEnvironmentVariables(path)));
@@ -139,6 +165,9 @@ public static class MimeTypes
         "image/gif" => ".gif",
         "audio/wav" or "audio/x-wav" => ".wav",
         "audio/mpeg" or "audio/mp3" => ".mp3",
+        "video/mp4" => ".mp4",
+        "video/webm" => ".webm",
+        "video/quicktime" or "video/mov" => ".mov",
         _ => ".bin",
     };
 }

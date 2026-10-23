@@ -72,10 +72,56 @@ public sealed class GeminiClient(HttpClient http, GeminiOptions options, ILogger
         var file = uploaded["file"] as JsonObject
             ?? throw new McpException("Gemini Files API 응답에 file 이 없습니다.");
 
-        // 영상 등은 서버측 처리(PROCESSING) 후 ACTIVE 가 되어야 사용할 수 있습니다.
+        return await WaitForFileAsync(file, ct);
+    }
+
+    /// <summary>Interactions API 호출 (영상 생성 모델 gemini-omni-* 등).</summary>
+    public async Task<JsonObject> CreateInteractionAsync(JsonObject request, CancellationToken ct)
+    {
+        logger.LogInformation("interactions.create model={Model}", request["model"]?.GetValue<string>());
+        using var message = CreateRequest(HttpMethod.Post, $"{ApiRoot}/interactions");
+        message.Content = new StringContent(request.ToJsonString(), Encoding.UTF8, "application/json");
+        return await SendAsync(message, ct);
+    }
+
+    public async Task<JsonObject> GetInteractionAsync(string id, CancellationToken ct)
+    {
+        using var message = CreateRequest(HttpMethod.Get, $"{ApiRoot}/interactions/{Uri.EscapeDataString(id)}");
+        return await SendAsync(message, ct);
+    }
+
+    /// <summary>
+    /// 모델이 생성한 파일(Files API URI 또는 "files/xxx")이 ACTIVE 가 될 때까지 기다린 뒤 내려받습니다.
+    /// </summary>
+    public async Task<byte[]> DownloadGeneratedFileAsync(string uri, CancellationToken ct)
+    {
+        var index = uri.IndexOf("files/", StringComparison.Ordinal);
+        string downloadUrl;
+        if (index >= 0)
+        {
+            var name = uri[index..].Split('?', ':')[0];
+            using var get = CreateRequest(HttpMethod.Get, $"{ApiRoot}/{name}");
+            await WaitForFileAsync(await SendAsync(get, ct), ct);
+            downloadUrl = $"{ApiRoot}/{name}:download?alt=media";
+        }
+        else
+        {
+            downloadUrl = uri;
+        }
+
+        logger.LogInformation("download {Url}", downloadUrl);
+        using var message = CreateRequest(HttpMethod.Get, downloadUrl);
+        using var response = await http.SendAsync(message, ct);
+        await EnsureSuccessAsync(response, ct);
+        return await response.Content.ReadAsByteArrayAsync(ct);
+    }
+
+    /// <summary>영상 등은 서버측 처리(PROCESSING) 후 ACTIVE 가 되어야 사용할 수 있습니다.</summary>
+    private async Task<JsonObject> WaitForFileAsync(JsonObject file, CancellationToken ct)
+    {
         var name = file["name"]?.GetValue<string>();
         var deadline = DateTime.UtcNow.AddMinutes(10);
-        while (file["state"]?.GetValue<string>() == "PROCESSING")
+        while (file["state"]?.GetValue<string>() is "PROCESSING" or "STATE_UNSPECIFIED")
         {
             if (DateTime.UtcNow > deadline)
                 throw new McpException($"파일 처리 대기 시간 초과: {name}");

@@ -37,10 +37,6 @@ services:
     environment:
       GEMINI_API_KEY: ${GEMINI_API_KEY:?GEMINI_API_KEY 환경 변수 또는 .env 설정이 필요합니다}
       MCP_ALLOWED_ORIGINS: ${MCP_ALLOWED_ORIGINS:-}
-      GEMINI_MODEL: ${GEMINI_MODEL:-}
-      GEMINI_PRO_MODEL: ${GEMINI_PRO_MODEL:-}
-      GEMINI_IMAGE_MODEL: ${GEMINI_IMAGE_MODEL:-}
-      GEMINI_TTS_MODEL: ${GEMINI_TTS_MODEL:-}
       # Claude 가 넘기는 호스트 경로를 컨테이너의 /share 로 변환하고, 결과 경로는 다시 호스트 경로로 돌려줍니다.
       GEMINI_MCP_PATH_MAPS: ${HOST_SHARE_DIR:?HOST_SHARE_DIR 를 .env 에 설정하세요}=/share
       GEMINI_MCP_OUTPUT_DIR: /share/${OUTPUT_SUBDIR:-gemini-mcp-output}

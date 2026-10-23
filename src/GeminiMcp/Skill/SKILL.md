@@ -1,6 +1,6 @@
 ---
 name: gemini-mcp
-description: Gemini MCP 서버(gemini_* 도구) 사용법. Claude 가 직접 할 수 없거나 약한 작업 — 실시간 Google 검색, 웹 페이지 읽기, 영상/오디오 분석·전사, 이미지 생성·편집, 음성 합성(TTS), Python 샌드박스 실행, 대용량 문서 분석, 다른 모델의 세컨드 오피니언 — 이 필요할 때 사용합니다.
+description: Gemini MCP 서버(gemini_* 도구) 사용법. Claude 가 직접 할 수 없거나 약한 작업 — 실시간 Google 검색, 웹 페이지 읽기, 영상/오디오 분석·전사, 이미지 생성·편집, 영상 생성·편집, 음성 합성(TTS), Python 샌드박스 실행, 대용량 문서 분석, 다른 모델의 세컨드 오피니언 — 이 필요할 때 사용합니다.
 ---
 
 # Gemini MCP 스킬
@@ -19,7 +19,9 @@ description: Gemini MCP 서버(gemini_* 도구) 사용법. Claude 가 직접 할
 | 텍스트 → 음성 파일(WAV) | `gemini_text_to_speech` | `text`, `voice`, `style`, `output_path` |
 | 계산·데이터 분석을 Python 샌드박스에서 실행 | `gemini_run_code` | `task`, `files[]` |
 | 세컨드 오피니언, 교차 검증, 초대형 컨텍스트(1M 토큰) 분석, JSON 구조화 출력 | `gemini_ask` | `prompt`, `files[]`, `model`, `json_schema` |
-| 사용 가능한 모델 확인 | `gemini_list_models` | `filter` |
+| 텍스트·이미지 → 영상(MP4) 생성, 기존 영상 편집·연장 | `gemini_generate_video` | `prompt`, `input_images[]`, `input_video`, `previous_interaction_id`, `aspect_ratio`, `resolution` |
+| 사용 가능한 모델을 용도별로 확인 (★ = 현재 선택) | `gemini_list_models` | `category`, `filter` |
+| 용도별 기본 모델 변경 | `gemini_select_model` | `category`, `model` |
 | 이 설명서 다시 보기 | `gemini_usage_guide` | — |
 
 ## 사용 규칙
@@ -27,16 +29,22 @@ description: Gemini MCP 서버(gemini_* 도구) 사용법. Claude 가 직접 할
 1. **파일 경로는 MCP 서버가 실행 중인 PC 기준의 절대 경로**를 사용합니다. (예: `C:\Users\me\Videos\demo.mp4`)
    http(s) URL 과 YouTube URL 도 그대로 넘길 수 있습니다.
    15MB 를 넘는 파일은 서버가 자동으로 Gemini Files API 에 업로드합니다 (영상은 처리 대기로 수십 초 걸릴 수 있음).
-2. **모델 선택**: `model` 을 생략하면 빠른 기본 모델(flash). 어려운 추론·긴 분석은 `model: "pro"`.
-   특정 버전이 필요하면 `gemini_list_models` 로 이름을 확인한 뒤 그대로 전달합니다.
-3. **생성 결과물**(이미지, 음성)은 파일로 저장되고 경로가 반환됩니다. `output_path` 를 생략하면 서버의 기본 출력 폴더
+2. **모델 선택**: 모델은 환경 변수가 아니라 도구로 고릅니다. 용도(category)는 `text`, `pro`, `image`, `tts`, `video` 입니다.
+   - `model` 을 생략하면 그 도구 용도에 선택된 모델을 씁니다 (처음에는 내장 기본값, 예: text = flash).
+     어려운 추론·긴 분석은 `model: "pro"`.
+   - 계속 쓸 모델을 바꾸려면 `gemini_list_models { category }` 로 후보를 보고 `gemini_select_model { category, model }` 로 선택합니다.
+     선택은 서버 전역이며 모든 클라이언트에 적용되고 재시작 후에도 유지됩니다. `model: "default"` 로 되돌립니다.
+   - 이번 호출만 다른 모델을 쓰려면 각 도구의 `model` 인수에 이름을 넘깁니다. 사용자가 요청하지 않았다면 전역 선택은 바꾸지 마세요.
+3. **영상 생성**은 수 분이 걸릴 수 있습니다. 결과의 `interaction_id` 를 `previous_interaction_id` 로 넘기면
+   방금 만든 영상을 이어서 편집·연장합니다(재업로드 불필요). 네거티브 프롬프트 필드는 없으므로 피할 내용은 프롬프트에 문장으로 적습니다.
+4. **생성 결과물**(이미지, 음성, 영상)은 파일로 저장되고 경로가 반환됩니다. `output_path` 를 생략하면 서버의 기본 출력 폴더
    (`~/gemini-mcp-output`, `GEMINI_MCP_OUTPUT_DIR` 로 변경 가능)에 저장됩니다.
    생성된 이미지를 직접 확인하려면 `return_image: true` 를 주거나, 반환된 경로의 파일을 읽으세요.
-4. **결과 검증**: Gemini 의 답변도 틀릴 수 있습니다. 검색 결과는 `## Sources` 의 출처를 사용자에게 함께 제시하고,
+5. **결과 검증**: Gemini 의 답변도 틀릴 수 있습니다. 검색 결과는 `## Sources` 의 출처를 사용자에게 함께 제시하고,
    중요한 결론은 Claude 가 한 번 더 검토하세요. 응답 끝의 `[gemini model=... tokens ...]` 줄은 메타 정보입니다.
-5. **프롬프트 작성 팁**: Gemini 에게는 맥락이 없습니다. 필요한 배경·제약·원하는 출력 형식을 프롬프트에 모두 적으세요.
+6. **프롬프트 작성 팁**: Gemini 에게는 맥락이 없습니다. 필요한 배경·제약·원하는 출력 형식을 프롬프트에 모두 적으세요.
    이미지 생성은 피사체·스타일·구도·조명·색감·넣을 문구를 구체적으로 적을수록 품질이 좋아집니다.
-6. 민감 정보(비밀번호, 키, 개인정보)가 담긴 파일·텍스트는 외부 API(Gemini)로 전송되므로 보내기 전에 사용자에게 확인하세요.
+7. 민감 정보(비밀번호, 키, 개인정보)가 담긴 파일·텍스트는 외부 API(Gemini)로 전송되므로 보내기 전에 사용자에게 확인하세요.
 
 ## 예시
 
@@ -61,6 +69,19 @@ description: Gemini MCP 서버(gemini_* 도구) 사용법. Claude 가 직접 할
 { "name": "gemini_generate_image", "arguments": { "prompt": "배경을 해질녘 해변으로 바꿔줘", "input_images": ["C:\\Work\\photo.jpg"] } }
 ```
 
+**영상 생성 / 이어서 편집**
+```json
+{ "name": "gemini_generate_video", "arguments": { "prompt": "비 오는 밤 네온 거리를 걷는 고양이, 낮은 앵글로 천천히 따라가는 카메라, 빗소리", "aspect_ratio": "16:9" } }
+{ "name": "gemini_generate_video", "arguments": { "prompt": "이 사진 속 인물이 손을 흔들며 미소 짓는 장면", "input_images": ["C:\\Work\\portrait.jpg"], "aspect_ratio": "9:16" } }
+{ "name": "gemini_generate_video", "arguments": { "prompt": "마지막에 우산을 펼치는 장면으로 연장", "previous_interaction_id": "v1_..." } }
+```
+
+**모델 확인 / 선택**
+```json
+{ "name": "gemini_list_models", "arguments": { "category": "image" } }
+{ "name": "gemini_select_model", "arguments": { "category": "text", "model": "gemini-3.1-pro-preview" } }
+```
+
 **음성 합성**
 ```json
 { "name": "gemini_text_to_speech", "arguments": { "text": "안녕하세요, 오늘의 브리핑을 시작합니다.", "voice": "Kore", "style": "차분한 뉴스 앵커처럼" } }
@@ -75,6 +96,6 @@ description: Gemini MCP 서버(gemini_* 도구) 사용법. Claude 가 직접 할
 ## 오류 대응
 
 - `GEMINI_API_KEY 가 설정되지 않았습니다` → 서버 실행 환경에 `GEMINI_API_KEY` 환경 변수를 설정 후 재시작.
-- `Gemini API 오류 (404 ...)` → 모델 이름 오류. `gemini_list_models` 로 확인.
+- `Gemini API 오류 (404 ...)` → 모델 이름 오류 또는 종료된 모델. `gemini_list_models` 로 확인하고 필요하면 `gemini_select_model` 로 교체.
 - `Gemini API 오류 (429 ...)` → 할당량 초과. 잠시 후 재시도하거나 `flash` 모델 사용.
 - `파일을 찾을 수 없습니다` → 경로가 서버 PC 기준 절대 경로인지 확인.
