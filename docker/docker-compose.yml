@@ -209,8 +209,26 @@ services:
       MCP_DOMAIN: ${MCP_DOMAIN:-localhost, 127.0.0.1}
       MCP_TLS: ${MCP_TLS:-internal}
       MCP_DEFAULT_SNI: ${MCP_DEFAULT_SNI:-127.0.0.1}
+      # "certkey" = 관리자 인증서 파일 사용, "" = MCP_TLS 그대로, 그 외(한쪽만 지정) = 시작 실패
+      MCP_TLS_FILES: ${MCP_TLS_CERT:+cert}${MCP_TLS_KEY:+key}
+    # 관리자가 준비한 인증서(MCP_TLS_CERT/MCP_TLS_KEY)가 있으면 MCP_TLS 대신 그 파일을 씁니다.
+    # Caddy 는 인증서 파일을 감시하지 않으므로 갱신 후에는 restart 하세요.
+    command:
+      - /bin/sh
+      - -c
+      - |
+        case "$$MCP_TLS_FILES" in
+          certkey) export MCP_TLS="/certs/cert.pem /certs/key.pem" ;;
+          "") ;;
+          *) echo "MCP_TLS_CERT 와 MCP_TLS_KEY 를 함께 지정하세요." >&2; exit 1 ;;
+        esac
+        exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # 관리자 인증서(PEM, 호스트 경로). 지정하지 않으면 자리만 채우는 Caddyfile 이 마운트되고 쓰이지 않습니다.
+      # 파일 단위로 마운트하므로 심볼릭 링크(certbot 의 live/...)는 호스트에서 실제 파일로 풀립니다.
+      - ${MCP_TLS_CERT:-./Caddyfile}:/certs/cert.pem:ro
+      - ${MCP_TLS_KEY:-./Caddyfile}:/certs/key.pem:ro
       # 로컬 CA·인증서 보존 (볼륨을 지우면 새 루트 인증서를 다시 신뢰시켜야 합니다)
       - caddy-data:/data
       - caddy-config:/config

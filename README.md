@@ -122,7 +122,7 @@ docker compose 를 직접 쓰는 경우: `docker compose -f docker/docker-compos
 
 | 명령 | 동작 |
 |---|---|
-| `setup` | `.env` 생성 (`-ShareDir`/`--share-dir`, `-Bind`/`--bind`, `-Port`/`--port`, `-Domain`/`--domain`, `-Force`/`--force`) |
+| `setup` | `.env` 생성 (`-ShareDir`/`--share-dir`, `-Bind`/`--bind`, `-Port`/`--port`, `-Domain`/`--domain`, `-TlsCert`·`-TlsKey`/`--tls-cert`·`--tls-key`, `-Force`/`--force`) |
 | `up` | 빌드 + 시작, healthcheck 통과까지 대기 |
 | `down` / `restart` / `logs` / `status` | 중지·삭제 / 재시작 / 로그 / 상태와 연결 정보 |
 | `rebuild` | 캐시 없이 베이스 이미지부터 다시 빌드 |
@@ -145,6 +145,7 @@ docker compose 를 직접 쓰는 경우: `docker compose -f docker/docker-compos
   같은 포트로 평문 `http://` 요청이 오면 Caddy 의 `http_redirect` 리스너가 `https://` 로 308 리다이렉트합니다(경로·쿼리·메서드·본문 유지).
   이후 TLS ALPN 으로 HTTP/2 가 협상되고, `Alt-Svc` 로 광고한 HTTP/3 로 브라우저가 자동 전환합니다. 평문으로 내용을 주고받지는 않습니다.
 - **인증서** (`MCP_TLS`)
+  - 아래의 `MCP_TLS_CERT`/`MCP_TLS_KEY` 를 지정하면 이 값은 무시됩니다.
   - `internal`(기본): Caddy 가 자체 로컬 CA 로 `MCP_DOMAIN`(기본 `localhost, 127.0.0.1`)의 인증서를 발급·갱신합니다.
     클라이언트가 루트 인증서를 신뢰해야 하므로 `up` 후 한 번 `cert` 를 실행하고, Claude Code(Node.js)에는 `NODE_EXTRA_CA_CERTS` 로 지정하세요.
     브라우저로 대시보드를 열 때도 이 루트 인증서를 신뢰시켜야 경고가 사라집니다 (Windows: `certutil -user -addstore Root docker\caddy-root.crt`).
@@ -155,6 +156,19 @@ docker compose 를 직접 쓰는 경우: `docker compose -f docker/docker-compos
     [Environment]::SetEnvironmentVariable("NODE_EXTRA_CA_CERTS", "$PWD\docker\caddy-root.crt", "User")  # 이후 Claude Code 재시작
     ```
   - 이메일 주소: 공개 DNS 도메인에 Let's Encrypt/ZeroSSL 공인 인증서를 자동 발급합니다 (TLS-ALPN 검증이므로 `MCP_BIND=0.0.0.0`, `MCP_PORT=443`, `MCP_DOMAIN=<도메인>` 필요).
+- **관리자가 준비한 인증서** (`MCP_TLS_CERT`, `MCP_TLS_KEY`): PEM 인증서(중간 인증서 체인 포함)와 개인 키의 호스트 경로를 둘 다 지정하면
+  `MCP_TLS` 대신 그 파일을 씁니다. 각 파일은 caddy 컨테이너의 `/certs/cert.pem`·`/certs/key.pem` 에 읽기 전용으로 마운트되며,
+  파일 단위 마운트라 certbot 의 `live/` 심볼릭 링크도 그대로 쓸 수 있습니다. 상대 경로는 `docker/` 폴더 기준입니다.
+  - 컨테이너는 추가 권한 없는 root 로 실행되므로, 키 파일이 root 가 아닌 다른 사용자 소유의 `600` 이면 읽지 못합니다 (root 소유 또는 읽기 권한 필요).
+  - `MCP_DOMAIN` 에는 인증서에 들어 있는 이름을 적으세요(클라이언트가 접속하는 이름). IP 로 접속하면 `MCP_DEFAULT_SNI` 도 맞춥니다.
+  - Caddy 는 인증서 파일 변경을 감지하지 않습니다. 갱신한 뒤 `restart` 하세요 (예: certbot `--deploy-hook "docker restart gemini-mcp-caddy"`).
+  - `up`/`restart` 는 시작 전에 두 파일이 있는지 확인합니다. 한쪽만 지정하면 caddy 가 시작하지 않습니다.
+
+  ```bash
+  docker/docker.sh setup --bind 0.0.0.0 --port 443 --domain mcp.example.com \
+    --tls-cert /etc/letsencrypt/live/mcp.example.com/fullchain.pem \
+    --tls-key /etc/letsencrypt/live/mcp.example.com/privkey.pem
+  ```
 - **다른 PC 에서 접속**: `setup -Bind 0.0.0.0` 후 접속에 쓰는 호스트명/IP 를 `MCP_DOMAIN` 에 추가하세요. IP 로 접속하면 SNI 가 없으므로 그 IP 를 `MCP_DEFAULT_SNI` 로 지정합니다.
   외부에 공개해도 MCP 는 API 키, 대시보드는 관리자 로그인이 있어야 쓸 수 있습니다.
 - **압축**: `Accept-Encoding` 에 따라 zstd → gzip 순으로 적용됩니다. MCP 도구 응답(SSE)도 압축됩니다. 압축은 Caddy 한 곳에서만 합니다.

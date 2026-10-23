@@ -1,6 +1,8 @@
 # Gemini MCP - Docker self-hosting helper (Windows PowerShell 5.1+ / PowerShell 7)
 #
-#   .\docker\docker.ps1 setup [-ShareDir C:\Users\me] [-Bind 127.0.0.1] [-Port 5100] [-Domain "localhost, 127.0.0.1"] [-S3] [-Force]
+#   .\docker\docker.ps1 setup [-ShareDir C:\Users\me] [-Bind 127.0.0.1] [-Port 5100] [-Domain "localhost, 127.0.0.1"]
+#                                   [-TlsCert fullchain.pem -TlsKey privkey.pem] [-S3] [-Force]
+#                                   -TlsCert/-TlsKey: use certificate files prepared by the server admin instead of MCP_TLS
 #                                   -S3: store generated media in the bundled S3 container (SeaweedFS) instead of the shared folder
 #   .\docker\docker.ps1 up          # build + start (runs setup first if .env is missing), waits until healthy
 #   .\docker\docker.ps1 down        # stop and remove the containers
@@ -16,6 +18,8 @@ param(
     [string]$Bind,
     [int]$Port,
     [string]$Domain,
+    [string]$TlsCert,
+    [string]$TlsKey,
     [switch]$S3,
     [switch]$Force
 )
@@ -51,13 +55,18 @@ function Invoke-Setup {
     $bindAddress = if ($Bind) { $Bind } else { "127.0.0.1" }
     $portNumber = if ($Port) { $Port } else { 5100 }
     $domainNames = if ($Domain) { $Domain } else { "localhost, 127.0.0.1" }
+    if ([bool]$TlsCert -ne [bool]$TlsKey) { throw "-TlsCert and -TlsKey must be given together." }
+    $certFile = if ($TlsCert) { (Resolve-Path $TlsCert -ErrorAction Stop).Path } else { "" }
+    $keyFile = if ($TlsKey) { (Resolve-Path $TlsKey -ErrorAction Stop).Path } else { "" }
 
     $template = [IO.File]::ReadAllText((Join-Path $root ".env.example"))
     $content = $template `
         -replace '(?m)^HOST_SHARE_DIR=.*$', "HOST_SHARE_DIR=$share" `
         -replace '(?m)^MCP_BIND=.*$', "MCP_BIND=$bindAddress" `
         -replace '(?m)^MCP_PORT=.*$', "MCP_PORT=$portNumber" `
-        -replace '(?m)^MCP_DOMAIN=.*$', "MCP_DOMAIN=$domainNames"
+        -replace '(?m)^MCP_DOMAIN=.*$', "MCP_DOMAIN=$domainNames" `
+        -replace '(?m)^MCP_TLS_CERT=.*$', "MCP_TLS_CERT=$certFile" `
+        -replace '(?m)^MCP_TLS_KEY=.*$', "MCP_TLS_KEY=$keyFile"
     if ($S3) {
         # Bundled SeaweedFS: account and bucket are created on first start from these values.
         $bytes = New-Object byte[] 16
@@ -75,6 +84,7 @@ function Invoke-Setup {
     Write-Host "Created $envFile"
     Write-Host "  shared folder : $share  ->  /share (outputs: $share\gemini-mcp-output)"
     Write-Host "  listen        : https://${bindAddress}:$portNumber  (TLS names: $domainNames)"
+    if ($certFile) { Write-Host "  certificate   : $certFile (key: $keyFile)" }
     $mediaStore = if ($S3) { "bundled S3 (SeaweedFS), bucket gemini-media" } else { "$share\gemini-mcp-output\.media" }
     Write-Host "  media store   : $mediaStore"
     if (-not (Test-Loopback $bindAddress) -and -not $Domain) {
@@ -134,6 +144,21 @@ function Export-Cert {
     Write-Host "Trust it in the Windows user store : certutil -user -addstore Root `"$caFile`""
 }
 
+# Certificate files prepared by the server admin (MCP_TLS_CERT/MCP_TLS_KEY). Checked before compose so a missing
+# file is reported here instead of Docker creating an empty directory in its place.
+function Assert-TlsFiles {
+    $certFile = Get-Setting "MCP_TLS_CERT" ""
+    $keyFile = Get-Setting "MCP_TLS_KEY" ""
+    if (-not $certFile -and -not $keyFile) { return }
+    if (-not $certFile -or -not $keyFile) { throw "Set both MCP_TLS_CERT and MCP_TLS_KEY in .env (or neither)." }
+    Push-Location $root  # relative paths resolve against docker/, like docker compose
+    try {
+        foreach ($file in @($certFile, $keyFile)) {
+            if (-not (Test-Path $file -PathType Leaf)) { throw "TLS certificate file not found: $file" }
+        }
+    } finally { Pop-Location }
+}
+
 # Same precedence as docker compose: shell environment first, then .env, then default.
 function Get-Setting([string]$name, [string]$default) {
     $value = [Environment]::GetEnvironmentVariable($name)
@@ -161,7 +186,11 @@ function Show-Connection {
     Show-SetupCode
     Write-Host "MCP endpoint : $base/mcp   (Authorization: Bearer <API key issued in the dashboard>)"
     Write-Host "Skill        : $base/skill"
-    if ((Get-Setting "MCP_TLS" "internal") -eq "internal") {
+    $certFile = Get-Setting "MCP_TLS_CERT" ""
+    $keyFile = Get-Setting "MCP_TLS_KEY" ""
+    if ($certFile) {
+        Write-Host "TLS          : certificate files $certFile, $keyFile  (restart after renewing them)"
+    } elseif ((Get-Setting "MCP_TLS" "internal") -eq "internal") {
         Write-Host "TLS          : Caddy local CA (run '.\docker\docker.ps1 cert' to export the root certificate for clients)"
     }
     Write-Host "Register in Claude Code:"
@@ -180,6 +209,7 @@ function Invoke-Up([string[]]$buildArgs) {
     Assert-Docker
     if (-not (Test-Path $envFile)) { Invoke-Setup }
     Set-ApiKey (Read-DotEnv)
+    Assert-TlsFiles
     if ($buildArgs) { Invoke-Compose (@("build") + $buildArgs) }
     Invoke-Compose @("up", "-d", "--build")
     Wait-Healthy
@@ -199,7 +229,7 @@ switch ($Command) {
     "up"          { Invoke-Up @() }
     "rebuild"     { Invoke-Up @("--no-cache", "--pull") }
     "down"        { Assert-Docker; Set-ApiKey (Read-DotEnv) -Optional; Invoke-Compose @("down") }
-    "restart"     { Assert-Docker; Set-ApiKey (Read-DotEnv); Invoke-Compose @("restart"); Wait-Healthy; Wait-Proxy; Show-Connection }
+    "restart"     { Assert-Docker; Set-ApiKey (Read-DotEnv); Assert-TlsFiles; Invoke-Compose @("restart"); Wait-Healthy; Wait-Proxy; Show-Connection }
     "cert"        { Assert-Docker; Export-Cert }
     "logs"        { Assert-Docker; Set-ApiKey (Read-DotEnv) -Optional; Invoke-Compose @("logs", "-f", "--tail", "200") }
     "reset-admin" { Invoke-ResetAdmin }

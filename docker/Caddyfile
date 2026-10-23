@@ -4,6 +4,8 @@
 #   MCP_DOMAIN  인증서를 발급할 이름 (쉼표 구분, 기본: localhost, 127.0.0.1)
 #   MCP_TLS     internal = Caddy 로컬 CA 로 자체 발급 (기본)
 #               <이메일>  = Let's Encrypt/ZeroSSL 공인 인증서 (공개 도메인 + 외부 443 포트 필요)
+#               .env 에 MCP_TLS_CERT/MCP_TLS_KEY(관리자가 준비한 인증서)를 지정하면 docker-compose.yml 의 시작 명령이
+#               이 값을 "/certs/cert.pem /certs/key.pem" 으로 바꿉니다 (Caddy 가 두 토큰으로 나눠 파일 인증서로 읽음).
 #   MCP_DEFAULT_SNI  IP 주소로 접속해 SNI 가 없을 때 쓸 인증서 이름 (기본: 127.0.0.1)
 #   MCP_PORT    HTTPS(TCP) + HTTP/3(UDP) 포트. 호스트와 같은 번호로 게시하므로 Alt-Svc 가 실제 포트를 광고합니다.
 {
