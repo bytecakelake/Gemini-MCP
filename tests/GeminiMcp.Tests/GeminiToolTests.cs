@@ -125,28 +125,20 @@ public sealed class GeminiToolTests(DefaultServer server) : IAsyncLifetime
 
     /// <summary>영상 생성은 느리고 비용이 커서 GEMINI_MCP_TEST_VIDEO=1 일 때만 실행합니다.</summary>
     [Fact]
-    public async Task GenerateVideo_SavesMp4()
+    public async Task GenerateVideo_ReturnsMp4Link()
     {
         Assert.SkipUnless(Environment.GetEnvironmentVariable("GEMINI_MCP_TEST_VIDEO") == "1", "Set GEMINI_MCP_TEST_VIDEO=1 to run.");
-        var name = $"video-{Guid.NewGuid():N}.mp4";
-        var text = (await _client.CallOkAsync("gemini_generate_video", new()
+        var result = await _client.CallOkAsync("gemini_generate_video", new()
         {
             ["prompt"] = "A red ball slowly rolling across a wooden table, static camera",
             ["resolution"] = "360p",
-            ["output_path"] = name,
-        })).Text();
+        });
 
-        var path = Path.Combine(server.OutputDirectory, name);
-        try
-        {
-            Assert.Contains("interaction_id", text);
-            var bytes = await File.ReadAllBytesAsync(path, TestContext.Current.CancellationToken);
-            Assert.Equal("ftyp", Encoding.ASCII.GetString(bytes, 4, 4));
-        }
-        finally
-        {
-            File.Delete(path);
-        }
+        Assert.Contains("interaction_id", result.Text());
+        var link = Assert.Single(result.Content.OfType<ResourceLinkBlock>());
+        var read = await _client.ReadResourceAsync(link.Uri, cancellationToken: TestContext.Current.CancellationToken);
+        var bytes = Assert.IsType<BlobResourceContents>(Assert.Single(read.Contents)).DecodedData.ToArray();
+        Assert.Equal("ftyp", Encoding.ASCII.GetString(bytes, 4, 4));
     }
 
     [Fact]
@@ -197,70 +189,68 @@ public sealed class GeminiToolTests(DefaultServer server) : IAsyncLifetime
     }
 
     [Fact]
-    public async Task GenerateImage_SavesFileReturnsImage_AndCanBeAnalyzed()
+    public async Task GenerateImage_ReturnsLinkAndImage_AndCanBeAnalyzed()
     {
-        var name = $"apple-{Guid.NewGuid():N}";
         var result = await _client.CallOkAsync("gemini_generate_image", new()
         {
             ["prompt"] = "A simple flat icon of a red apple on a white background",
             ["aspect_ratio"] = "1:1",
-            ["output_path"] = $"{name}.png",
             ["return_image"] = true,
         });
 
-        var saved = Assert.Single(Directory.GetFiles(server.OutputDirectory, $"{name}.*"));
-        try
-        {
-            var image = Assert.Single(result.Content.OfType<ImageContentBlock>());
-            // 저장된 확장자는 실제 이미지 형식과 일치해야 합니다 (요청은 .png 여도 JPEG 이면 .jpg).
-            Assert.Equal(ExtensionFor(image.MimeType), Path.GetExtension(saved));
-            Assert.True(new FileInfo(saved).Length > 1000);
-            // 응답의 경로는 클라이언트(호스트) 기준이어야 합니다 (Docker 경로 매핑 검증).
-            Assert.Contains(saved, result.Text(), StringComparison.OrdinalIgnoreCase);
+        var image = Assert.Single(result.Content.OfType<ImageContentBlock>());
+        // 임시 보관본은 ResourceLink 로 오고, resources/read 로 응답의 이미지와 같은 바이트를 받을 수 있어야 합니다.
+        var link = Assert.Single(result.Content.OfType<ResourceLinkBlock>());
+        Assert.StartsWith("gemini://media/", link.Uri);
+        // 이름의 확장자는 실제 이미지 형식과 일치해야 합니다.
+        Assert.EndsWith(ExtensionFor(image.MimeType), link.Uri);
+        Assert.Equal(image.MimeType, link.MimeType);
+        var read = await _client.ReadResourceAsync(link.Uri, cancellationToken: TestContext.Current.CancellationToken);
+        var blob = Assert.IsType<BlobResourceContents>(Assert.Single(read.Contents));
+        Assert.Equal(image.DecodedData.ToArray(), blob.DecodedData.ToArray());
+        Assert.True(blob.DecodedData.Length > 1000);
 
-            var text = (await _client.CallOkAsync("gemini_analyze_media", new()
-            {
-                ["files"] = new[] { saved },
-                ["prompt"] = "What fruit is shown? One word.",
-            })).Text();
-            Assert.Contains("apple", text, StringComparison.OrdinalIgnoreCase);
-        }
-        finally
+        // 생성 미디어 URI 를 다른 도구의 입력으로 바로 넘길 수 있어야 합니다.
+        var text = (await _client.CallOkAsync("gemini_analyze_media", new()
         {
-            File.Delete(saved);
-        }
+            ["files"] = new[] { link.Uri },
+            ["prompt"] = "What fruit is shown? One word.",
+        })).Text();
+        Assert.Contains("apple", text, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public async Task TextToSpeech_WritesWav_AndCanBeTranscribed()
+    public async Task TextToSpeech_ReturnsWavLink_AndCanBeTranscribed()
     {
-        var name = $"speech-{Guid.NewGuid():N}.wav";
-        var text = (await _client.CallOkAsync("gemini_text_to_speech", new()
+        var before = Directory.GetFiles(server.OutputDirectory).Length;
+        var result = await _client.CallOkAsync("gemini_text_to_speech", new()
         {
             ["text"] = "Hello from the Gemini MCP server. Verification complete.",
             ["voice"] = "Kore",
-            ["output_path"] = name,
+        });
+
+        // 출력 폴더에 영구 저장하지 않고 ResourceLink 만 돌려줍니다.
+        Assert.Equal(before, Directory.GetFiles(server.OutputDirectory).Length);
+        var link = Assert.Single(result.Content.OfType<ResourceLinkBlock>());
+        Assert.Equal("audio/wav", link.MimeType);
+        Assert.Contains(link.Uri, result.Text());
+        // 에이전트가 곧 삭제된다는 사실을 알 수 있어야 합니다.
+        Assert.Contains("자동 삭제", result.Text());
+        Assert.Contains("자동 삭제", link.Description);
+
+        var read = await _client.ReadResourceAsync(link.Uri, cancellationToken: TestContext.Current.CancellationToken);
+        var wav = Assert.IsType<BlobResourceContents>(Assert.Single(read.Contents)).DecodedData.ToArray();
+        Assert.Equal(link.Size, wav.Length);
+        var header = Encoding.ASCII.GetString(wav, 0, 12);
+        Assert.StartsWith("RIFF", header);
+        Assert.EndsWith("WAVE", header);
+
+        var transcript = (await _client.CallOkAsync("gemini_analyze_media", new()
+        {
+            ["files"] = new[] { link.Uri },
+            ["prompt"] = "Transcribe this audio verbatim.",
         })).Text();
-
-        var wav = Path.Combine(server.OutputDirectory, name);
-        try
-        {
-            Assert.Contains(wav, text, StringComparison.OrdinalIgnoreCase);
-            var header = Encoding.ASCII.GetString(File.ReadAllBytes(wav), 0, 12);
-            Assert.StartsWith("RIFF", header);
-            Assert.EndsWith("WAVE", header);
-
-            var transcript = (await _client.CallOkAsync("gemini_analyze_media", new()
-            {
-                ["files"] = new[] { wav },
-                ["prompt"] = "Transcribe this audio verbatim.",
-            })).Text();
-            Assert.Contains("verification", transcript, StringComparison.OrdinalIgnoreCase);
-        }
-        finally
-        {
-            File.Delete(wav);
-        }
+        Assert.Contains("verification", transcript, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

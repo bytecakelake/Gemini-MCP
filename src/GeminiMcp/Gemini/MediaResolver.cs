@@ -4,10 +4,10 @@ using ModelContextProtocol;
 namespace GeminiMcp.Gemini;
 
 /// <summary>
-/// 로컬 경로 / http(s) URL / YouTube URL / Gemini 파일 URI 를 Gemini "part" 로 변환합니다.
+/// 로컬 경로 / http(s) URL / YouTube URL / Gemini 파일 URI / 생성 미디어 URI 를 Gemini "part" 로 변환합니다.
 /// 작은 파일은 inlineData(base64), 큰 파일은 Files API 업로드 후 fileData 로 보냅니다.
 /// </summary>
-public sealed class MediaResolver(GeminiClient gemini, HttpClient http, GeminiOptions options)
+public sealed class MediaResolver(GeminiClient gemini, HttpClient http, MediaStore store, GeminiOptions options)
 {
     private const long MaxDownloadBytes = 2L * 1024 * 1024 * 1024;
 
@@ -19,6 +19,10 @@ public sealed class MediaResolver(GeminiClient gemini, HttpClient http, GeminiOp
 
         if (IsYouTube(source))
             return FileDataPart(source, mimeType: null);
+
+        // 이 서버가 생성한 미디어(gemini://media/... 또는 /mcp/media/... URL)는 보관소에서 바로 읽습니다.
+        if (MediaStore.IsMediaReference(source))
+            return await FromMediaStoreAsync(source, ct);
 
         if (source.StartsWith($"{options.BaseUrl}/v1beta/files/", StringComparison.OrdinalIgnoreCase))
             return FileDataPart(source, mimeType: null);
@@ -74,6 +78,27 @@ public sealed class MediaResolver(GeminiClient gemini, HttpClient http, GeminiOp
         await using var stream = info.OpenRead();
         var file = await gemini.UploadFileAsync(stream, info.Length, mimeType, info.Name, ct);
         return FileDataPart(file["uri"]!.GetValue<string>(), file["mimeType"]?.GetValue<string>() ?? mimeType);
+    }
+
+    private async Task<JsonObject> FromMediaStoreAsync(string source, CancellationToken ct)
+    {
+        await using var media = await store.OpenAsync(source, ct)
+            ?? throw new McpException($"생성 미디어를 찾을 수 없습니다(보관 기간이 지나 삭제되었을 수 있음): {source}");
+
+        if (media.Length is { } length && length > options.InlineLimitBytes)
+        {
+            var file = await gemini.UploadFileAsync(media.Content, length, media.MimeType, source[(source.LastIndexOf('/') + 1)..], ct);
+            return FileDataPart(file["uri"]!.GetValue<string>(), file["mimeType"]?.GetValue<string>() ?? media.MimeType);
+        }
+
+        using var buffer = new MemoryStream();
+        await media.Content.CopyToAsync(buffer, ct);
+        if (buffer.Length <= options.InlineLimitBytes)
+            return InlinePart(buffer.ToArray(), media.MimeType);
+
+        buffer.Position = 0;
+        var uploaded = await gemini.UploadFileAsync(buffer, buffer.Length, media.MimeType, source[(source.LastIndexOf('/') + 1)..], ct);
+        return FileDataPart(uploaded["uri"]!.GetValue<string>(), uploaded["mimeType"]?.GetValue<string>() ?? media.MimeType);
     }
 
     private async Task<JsonObject> FromUrlAsync(Uri uri, CancellationToken ct)

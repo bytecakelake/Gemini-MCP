@@ -15,8 +15,8 @@ description: Gemini MCP 서버(gemini_* 도구) 사용법. Claude 가 직접 할
 | 최신 정보·뉴스·가격·버전 확인 (학습 이후 정보) | `gemini_web_search` | `query`, `instructions` |
 | 특정 웹 페이지(최대 20개) 읽기·요약·비교 | `gemini_read_urls` | `urls[]`, `prompt`, `also_search` |
 | 영상·오디오 이해 (요약, 장면 설명, 받아쓰기, 화자 구분, 번역) / YouTube | `gemini_analyze_media` | `files[]`, `prompt` |
-| 이미지 생성 / 기존 이미지 편집·합성 | `gemini_generate_image` | `prompt`, `input_images[]`, `aspect_ratio`, `output_path` |
-| 텍스트 → 음성 파일(WAV) | `gemini_text_to_speech` | `text`, `voice`, `style`, `output_path` |
+| 이미지 생성 / 기존 이미지 편집·합성 | `gemini_generate_image` | `prompt`, `input_images[]`, `aspect_ratio`, `return_image` |
+| 텍스트 → 음성 파일(WAV) | `gemini_text_to_speech` | `text`, `voice`, `style` |
 | 계산·데이터 분석을 Python 샌드박스에서 실행 | `gemini_run_code` | `task`, `files[]` |
 | 세컨드 오피니언, 교차 검증, 초대형 컨텍스트(1M 토큰) 분석, JSON 구조화 출력 | `gemini_ask` | `prompt`, `files[]`, `model`, `json_schema` |
 | 텍스트·이미지 → 영상(MP4) 생성, 기존 영상 편집·연장 | `gemini_generate_video` | `prompt`, `input_images[]`, `input_video`, `previous_interaction_id`, `aspect_ratio`, `resolution` |
@@ -40,9 +40,15 @@ description: Gemini MCP 서버(gemini_* 도구) 사용법. Claude 가 직접 할
    - 이번 호출만 다른 모델을 쓰려면 각 도구의 `model` 인수에 이름을 넘깁니다. 사용자가 요청하지 않았다면 전역 선택은 바꾸지 마세요.
 3. **영상 생성**은 수 분이 걸릴 수 있습니다. 결과의 `interaction_id` 를 `previous_interaction_id` 로 넘기면
    방금 만든 영상을 이어서 편집·연장합니다(재업로드 불필요). 네거티브 프롬프트 필드는 없으므로 피할 내용은 프롬프트에 문장으로 적습니다.
-4. **생성 결과물**(이미지, 음성, 영상)은 파일로 저장되고 경로가 반환됩니다. `output_path` 를 생략하면 서버의 기본 출력 폴더
-   (`~/gemini-mcp-output`, `GEMINI_MCP_OUTPUT_DIR` 로 변경 가능)에 저장됩니다.
-   생성된 이미지를 직접 확인하려면 `return_image: true` 를 주거나, 반환된 경로의 파일을 읽으세요.
+4. **생성 결과물**(이미지, 음성, 영상)은 서버 저장소(로컬 디스크 또는 S3)에 보관 기간(기본 48시간, Gemini Files API 와 같음) 동안 보관되고
+   `gemini://media/<이름>` **ResourceLink** 로 반환됩니다. 서버는 결과물을 영구 저장하지 않습니다.
+   바이트는 응답에 넣지 않으므로 토큰을 거의 쓰지 않습니다. 필요할 때만 리소스로 읽거나(resources/read),
+   다운로드 URL(`/mcp/media/<이름>`, MCP 와 같은 API 키)로 받으세요.
+   - ⚠ **곧 삭제됩니다.** 보관 기간이 지나면(정확한 시각은 결과에 표시) 파일이 자동 삭제되고 복구할 수 없으며, 그 URI 를 다른 도구에 넘겨도 실패합니다.
+     사용자에게 결과물을 전달하거나 나중에 다시 쓸 예정이면 그 전에 내려받아 클라이언트 쪽에 저장하세요.
+     사용자에게 링크만 전달할 때는 곧 만료된다는 점도 함께 알리세요.
+   - 다른 도구의 입력(`files`, `input_images`, `input_video`)에 `gemini://media/...` URI 를 그대로 넘길 수 있습니다.
+   - 생성된 이미지를 직접 봐야 할 때만 `return_image: true` 를 주세요(이미지 한 장당 수천 토큰).
 5. **결과 검증**: Gemini 의 답변도 틀릴 수 있습니다. 검색 결과는 `## Sources` 의 출처를 사용자에게 함께 제시하고,
    중요한 결론은 Claude 가 한 번 더 검토하세요. 응답 끝의 `[gemini model=... tokens ...]` 줄은 메타 정보입니다.
 6. **프롬프트 작성 팁**: Gemini 에게는 맥락이 없습니다. 필요한 배경·제약·원하는 출력 형식을 프롬프트에 모두 적으세요.
@@ -68,7 +74,7 @@ description: Gemini MCP 서버(gemini_* 도구) 사용법. Claude 가 직접 할
 
 **이미지 생성 / 편집**
 ```json
-{ "name": "gemini_generate_image", "arguments": { "prompt": "미니멀한 플랫 스타일의 고양이 앱 아이콘, 파스텔 블루 배경", "aspect_ratio": "1:1", "output_path": "C:\\Work\\icon.png" } }
+{ "name": "gemini_generate_image", "arguments": { "prompt": "미니멀한 플랫 스타일의 고양이 앱 아이콘, 파스텔 블루 배경", "aspect_ratio": "1:1" } }
 { "name": "gemini_generate_image", "arguments": { "prompt": "배경을 해질녘 해변으로 바꿔줘", "input_images": ["C:\\Work\\photo.jpg"] } }
 ```
 

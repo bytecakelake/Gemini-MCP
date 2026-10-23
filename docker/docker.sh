@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Gemini MCP - Docker self-hosting helper (Linux / macOS / Git Bash)
 #
-#   docker/docker.sh setup [--share-dir DIR] [--bind 127.0.0.1] [--port 5100] [--domain "localhost, 127.0.0.1"] [--force]
+#   docker/docker.sh setup [--share-dir DIR] [--bind 127.0.0.1] [--port 5100] [--domain "localhost, 127.0.0.1"] [--s3] [--force]
+#                          --s3: store generated media in the bundled S3 container (SeaweedFS) instead of the shared folder
 #   docker/docker.sh up          # build + start (runs setup first if .env is missing), waits until healthy
 #   docker/docker.sh down | restart | rebuild | logs | status
 #   docker/docker.sh cert        # export the Caddy local CA root certificate (MCP_TLS=internal) to docker/caddy-root.crt
@@ -17,13 +18,14 @@ CA_FILE="$ROOT/caddy-root.crt"
 
 COMMAND="${1:-up}"
 [ $# -gt 0 ] && shift
-SHARE_DIR="" BIND="" PORT="" DOMAIN="" FORCE=0
+SHARE_DIR="" BIND="" PORT="" DOMAIN="" S3=0 FORCE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --share-dir) SHARE_DIR="$2"; shift 2 ;;
     --bind) BIND="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
     --domain) DOMAIN="$2"; shift 2 ;;
+    --s3) S3=1; shift ;;
     --force) FORCE=1; shift ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -58,10 +60,23 @@ setup() {
       -e "s|^DOCKER_UID=.*|DOCKER_UID=$(id -u)|" \
       -e "s|^DOCKER_GID=.*|DOCKER_GID=$(id -g)|" \
       "$ROOT/.env.example" > "$ENV_FILE"
+  if [ "$S3" -eq 1 ]; then
+    # Bundled SeaweedFS: account and bucket are created on first start from these values.
+    local secret
+    secret="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    sed -i.bak -e "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=s3|" \
+        -e "s|^S3_ENDPOINT=.*|S3_ENDPOINT=http://s3:8333|" \
+        -e "s|^S3_BUCKET=.*|S3_BUCKET=gemini-media|" \
+        -e "s|^S3_ACCESS_KEY=.*|S3_ACCESS_KEY=gemini-mcp|" \
+        -e "s|^S3_SECRET_KEY=.*|S3_SECRET_KEY=$secret|" "$ENV_FILE"
+    rm -f "$ENV_FILE.bak"
+  fi
   chmod 600 "$ENV_FILE"
   echo "Created $ENV_FILE"
   echo "  shared folder : $share  ->  /share (outputs: $share/gemini-mcp-output)"
   echo "  listen        : https://$bind:$port  (TLS names: $domain)"
+  if [ "$S3" -eq 1 ]; then echo "  media store   : bundled S3 (SeaweedFS), bucket gemini-media"
+  else echo "  media store   : $share/gemini-mcp-output/.media"; fi
   if ! is_loopback "$bind" && [ -z "$DOMAIN" ]; then
     echo "  note          : add this host's name/IP to MCP_DOMAIN in .env (or pass --domain) so remote clients get a matching certificate"
   fi

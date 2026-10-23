@@ -44,6 +44,8 @@ public abstract class GeminiServer : IAsyncLifetime
     public Uri McpEndpoint => new(BaseUri, "/mcp");
     /// <summary>서버가 생성 파일을 저장하는 폴더 (테스트 PC 기준 경로).</summary>
     public string OutputDirectory { get; }
+    /// <summary>생성 미디어 임시 보관 폴더 (로컬 프로세스에서만 알 수 있음).</summary>
+    public string? MediaDirectory => IsExternal ? null : Path.Combine(OutputDirectory, ".media");
     public string? ApiKey { get; } = ResolveApiKey();
     public HttpClient Http { get; } = new() { Timeout = TimeSpan.FromMinutes(10) };
     public string Log { get { lock (_log) return _log.ToString(); } }
@@ -76,6 +78,7 @@ public abstract class GeminiServer : IAsyncLifetime
             CreateNoWindow = true,
         };
         psi.Environment["GEMINI_MCP_OUTPUT_DIR"] = OutputDirectory;
+        psi.Environment["GEMINI_MCP_MEDIA_DIR"] = MediaDirectory!;
         if (ApiKey is not null)
             psi.Environment["GEMINI_API_KEY"] = ApiKey;
         foreach (var (key, value) in ExtraEnvironment)
@@ -190,6 +193,40 @@ public sealed class UploadServer : GeminiServer
 
     protected override IReadOnlyDictionary<string, string> ExtraEnvironment =>
         new Dictionary<string, string> { ["GEMINI_INLINE_LIMIT_BYTES"] = "1024" };
+}
+
+/// <summary>미디어 보관 기간을 약 3.6초(0.001시간)로 줄인 서버 (보관 기간 설정 검증용).</summary>
+public sealed class ShortTtlServer : GeminiServer
+{
+    protected override bool AllowExternal => false;
+
+    protected override IReadOnlyDictionary<string, string> ExtraEnvironment =>
+        new Dictionary<string, string> { ["GEMINI_MCP_MEDIA_TTL_HOURS"] = "0.001" };
+}
+
+/// <summary>
+/// S3 호환 저장소를 쓰는 서버. GEMINI_MCP_TEST_S3_ENDPOINT / _ACCESS_KEY / _SECRET_KEY 가 있을 때만 씁니다
+/// (예: docker run -p 127.0.0.1:18333:8333 -e AWS_ACCESS_KEY_ID=.. -e AWS_SECRET_ACCESS_KEY=.. chrislusf/seaweedfs:4.48).
+/// 실행마다 새 버킷을 써서 서버가 버킷을 만드는 경로도 검증합니다. 보관 기간은 약 7초입니다.
+/// </summary>
+public sealed class S3Server : GeminiServer
+{
+    public static readonly string? Endpoint = Environment.GetEnvironmentVariable("GEMINI_MCP_TEST_S3_ENDPOINT");
+    public string Bucket { get; } = $"gmcp-test-{Guid.NewGuid():N}"[..30];
+    public bool IsConfigured => !string.IsNullOrEmpty(Endpoint);
+
+    protected override bool AllowExternal => false;
+
+    protected override IReadOnlyDictionary<string, string> ExtraEnvironment => IsConfigured
+        ? new Dictionary<string, string>
+        {
+            ["GEMINI_MCP_S3_ENDPOINT"] = Endpoint!,
+            ["GEMINI_MCP_S3_BUCKET"] = Bucket,
+            ["GEMINI_MCP_S3_ACCESS_KEY"] = Environment.GetEnvironmentVariable("GEMINI_MCP_TEST_S3_ACCESS_KEY") ?? "",
+            ["GEMINI_MCP_S3_SECRET_KEY"] = Environment.GetEnvironmentVariable("GEMINI_MCP_TEST_S3_SECRET_KEY") ?? "",
+            ["GEMINI_MCP_MEDIA_TTL_HOURS"] = "0.002",
+        }
+        : new Dictionary<string, string>();
 }
 
 [CollectionDefinition(Name)]

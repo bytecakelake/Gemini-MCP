@@ -20,6 +20,7 @@ dashboard ─(Admin API)─▶ APISIX ─▶ etcd (라우트·API 키)
 | `loki` | [Grafana Loki](https://grafana.com/oss/loki/) 3.7 (AGPL-3.0) | 요청·관리·시스템 로그 저장. 대시보드 지표도 LogQL 로 여기서 계산 |
 | `dashboard` | Nuxt 4 + Vuetify 4(Material Design) + TypeScript, Nitro `deno-server` | 모니터링, 로그, API 키 관리, 설정. 서버 쪽에서 관리자 인증과 APISIX·Loki 연동 |
 | `caddy` | Caddy 2 | TLS 종단, zstd/gzip 압축, HTTP/3 |
+| `s3` (선택) | [SeaweedFS](https://github.com/seaweedfs/seaweedfs) 4.48 (Apache-2.0) | 생성 미디어용 내장 S3 저장소. `COMPOSE_PROFILES=s3` 일 때만 실행 |
 
 ## 제공 도구
 
@@ -28,11 +29,11 @@ dashboard ─(Admin API)─▶ APISIX ─▶ etcd (라우트·API 키)
 | `gemini_web_search` | Google 검색 그라운딩 — 최신 정보 + 출처 |
 | `gemini_read_urls` | URL Context — 웹 페이지(최대 20개) 읽기·요약·비교 |
 | `gemini_analyze_media` | 영상·오디오·이미지·PDF·YouTube 분석, 전사(받아쓰기) |
-| `gemini_generate_image` | 이미지 생성/편집 (Nano Banana) → 파일 저장 |
-| `gemini_text_to_speech` | 음성 합성 → WAV 저장 |
+| `gemini_generate_image` | 이미지 생성/편집 (Nano Banana) → ResourceLink |
+| `gemini_text_to_speech` | 음성 합성 → WAV ResourceLink |
 | `gemini_run_code` | Gemini Python 샌드박스 코드 실행 |
 | `gemini_ask` | 세컨드 오피니언, 대용량 컨텍스트 분석, JSON Schema 구조화 출력 |
-| `gemini_generate_video` | 영상 생성/편집/연장 (Gemini Omni) → MP4 저장 |
+| `gemini_generate_video` | 영상 생성/편집/연장 (Gemini Omni) → MP4 ResourceLink |
 | `gemini_list_models` | 사용 가능한 모델을 용도(text/pro/image/tts/video)별로 표시, 현재 선택 표시 |
 | `gemini_select_model` | 용도별 기본 모델 선택 (서버 전역, 재시작 후에도 유지) |
 | `gemini_usage_guide` | 내장 스킬(사용 설명서) 반환 |
@@ -165,9 +166,21 @@ docker compose 를 직접 쓰는 경우: `docker compose -f docker/docker-compos
 
 - **Gemini API 키**: `.env` 의 `GEMINI_API_KEY` 를 비워 두면 셸(Windows 는 사용자 환경 변수 포함)의 값을 씁니다. 키를 파일에 평문으로 저장하지 않으려면 비워 두세요.
 - **파일 공유**: 컨테이너는 호스트 파일을 볼 수 없으므로 `HOST_SHARE_DIR`(기본: 사용자 홈)을 `/share` 로 마운트하고 경로를 자동 변환합니다.
-  Claude 가 `C:\Users\me\video.mp4` 를 넘기면 서버는 `/share/video.mp4` 를 읽고, 생성 파일은
-  `C:\Users\me\gemini-mcp-output\...` 처럼 **호스트 경로로** 돌려줍니다. 공유 폴더 밖의 파일은 읽을 수 없습니다.
-- **데이터 볼륨**: `etcd-data`(라우트·API 키), `loki-data`(로그), `dashboard-data`(관리자 비밀번호 해시), `caddy-data`(인증서).
+  Claude 가 `C:\Users\me\video.mp4` 를 넘기면 서버는 `/share/video.mp4` 를 읽습니다. 공유 폴더 밖의 파일은 읽을 수 없습니다.
+- **생성 미디어**: 이미지·음성·영상은 응답에 바이트를 넣지 않고 `gemini://media/<이름>` ResourceLink 로 돌려줍니다.
+  보관 기간은 `MEDIA_TTL_HOURS`(기본 48시간 = Gemini Files API 의 보관 기간)이고, 지나면 자동 삭제됩니다.
+  클라이언트는 MCP `resources/read` 또는 `GET /mcp/media/<이름>`(MCP 와 같은 API 키)으로 받아 직접 저장합니다.
+  저장소는 셋 중 하나를 고릅니다.
+
+  | 저장소 | 설정 |
+  |---|---|
+  | 공유 폴더 (기본) | 아무것도 설정하지 않으면 `<HOST_SHARE_DIR>/<OUTPUT_SUBDIR>/.media` |
+  | 내장 S3 (SeaweedFS 컨테이너) | `docker.ps1 setup -S3` / `docker.sh setup --s3` 가 `COMPOSE_PROFILES=s3`, `S3_ENDPOINT=http://s3:8333`, 버킷, 무작위 비밀 키를 채웁니다. 버킷과 계정은 첫 실행 때 자동 생성되고 데이터는 `s3-data` 볼륨에 남습니다 |
+  | 외부 S3 (AWS S3, Cloudflare R2, Backblaze B2, MinIO 등) | `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, 그리고 `S3_ENDPOINT`(AWS 면 비우고 `S3_REGION`) |
+
+  S3 만료 정리는 서버가 직접 합니다(목록 조회 후 삭제). 버킷 수명 주기 규칙은 필요 없지만, 함께 걸어 두면 서버가 꺼져 있어도 정리됩니다.
+  버킷이 없으면 시작할 때 만듭니다. 외부 S3 키에는 해당 버킷(접두사 `S3_PREFIX`, 기본 `gemini-mcp-media/`)의 읽기·쓰기·목록·삭제 권한이 필요합니다.
+- **데이터 볼륨**: `etcd-data`(라우트·API 키), `loki-data`(로그), `dashboard-data`(관리자 비밀번호 해시), `caddy-data`(인증서), `s3-data`(내장 S3).
 - 설정 항목 전체는 [docker/.env.example](docker/.env.example) 을 참고하세요. 설정 우선순위는 셸 환경 변수 > `.env` 입니다 (docker compose 와 동일).
 
 ## MCP 서버 단독 실행 (개발용)
@@ -183,7 +196,16 @@ $env:GEMINI_API_KEY = "<your key>"
 | 환경 변수 | 기본값 | 설명 |
 |---|---|---|
 | `GEMINI_API_KEY` | (필수) | `GOOGLE_API_KEY` 도 인식 |
-| `GEMINI_MCP_OUTPUT_DIR` | `~/gemini-mcp-output` | 생성 파일 저장 폴더 |
+| `GEMINI_MCP_OUTPUT_DIR` | `~/gemini-mcp-output` | 모델 선택(`.gemini-mcp-models.json`) 저장 폴더 |
+| `GEMINI_MCP_MEDIA_TTL_HOURS` | `48` | 생성 미디어 보관 시간(시간, 소수 가능). 지나면 자동 삭제 |
+| `GEMINI_MCP_MEDIA_DIR` | `<임시 폴더>/gemini-mcp-media` | 로컬 디스크 보관 폴더 (S3 를 쓰지 않을 때) |
+| `GEMINI_MCP_S3_BUCKET` | (없음) | 지정하면 S3 호환 저장소에 보관 |
+| `GEMINI_MCP_S3_ENDPOINT` | `https://s3.<region>.amazonaws.com` | S3 호환 서버 주소 (SeaweedFS, R2, MinIO 등) |
+| `GEMINI_MCP_S3_REGION` | `us-east-1` | 서명 리전 (`AWS_REGION` 도 인식) |
+| `GEMINI_MCP_S3_ACCESS_KEY` / `_SECRET_KEY` | (S3 사용 시 필수) | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` 도 인식 |
+| `GEMINI_MCP_S3_PREFIX` | `gemini-mcp-media/` | 버킷 안 키 접두사 |
+| `GEMINI_MCP_S3_PATH_STYLE` | 엔드포인트 지정 시 `true` | path-style 주소 사용 여부 |
+| `GEMINI_MCP_PUBLIC_URL` | (요청 Host) | 미디어 다운로드 URL 의 기준 주소 |
 | `GEMINI_INLINE_LIMIT_BYTES` | `15728640` | 이보다 큰 파일은 Files API 로 업로드 |
 | `MCP_ALLOWED_ORIGINS` | (localhost 만) | 허용할 브라우저 Origin, 쉼표 구분 |
 | `ASPNETCORE_URLS` / `--urls` | `http://127.0.0.1:5100` | 수신 주소 |
@@ -237,6 +259,8 @@ dotnet test --project tests/GeminiMcp.Tests --filter-not-trait "Category=Live" #
 | `McpProtocolTests` | initialize(서버 정보·instructions·capabilities), 구버전 프로토콜(2025-03-26/06-18/11-25) 협상, 도구 목록·스키마, 스킬 프롬프트·리소스, 도구 오류(isError) |
 | `GeminiToolTests` (Live) | 9개 도구 실호출: 검색 출처, JSON Schema, Python 실행, 이미지 생성→재인식, TTS→받아쓰기, YouTube |
 | `FilesApiUploadTests` (Live) | 인라인 한도를 넘는 파일이 Files API 업로드 경로로 처리되는지 |
+| `MediaStoreTests` 외 | 미디어 리소스·다운로드, 경로 탈출 차단, 기본 48시간·설정한 보관 기간 만료, `output_path` 없음 |
+| `S3MediaStoreTests` | 버킷 자동 생성, (Live) 음성 생성→S3 저장→리소스·HTTP 조회→받아쓰기→만료. `GEMINI_MCP_TEST_S3_*` 가 있을 때만 |
 
 - `GEMINI_API_KEY` 가 없으면 Live 테스트는 건너뜁니다 (Windows 에서는 사용자 환경 변수도 읽음).
 - 다른 실행 파일을 검증하려면 `GEMINI_MCP_EXE` 환경 변수로 경로를 지정합니다.
@@ -250,6 +274,15 @@ dotnet test --project tests/GeminiMcp.Tests --filter-not-trait "Category=Live" #
   $env:GEMINI_MCP_TEST_OUTPUT_DIR = "$HOME\gemini-mcp-output"   # HOST_SHARE_DIR\OUTPUT_SUBDIR
   dotnet test --project tests/GeminiMcp.Tests
   ```
+- **S3 저장소 검증**: 일회용 SeaweedFS 를 띄우고 주소와 키를 넘깁니다 (테스트마다 새 버킷을 만듭니다).
+
+  ```powershell
+  docker run -d --rm --name gmcp-s3-test -p 127.0.0.1:18333:8333 -e AWS_ACCESS_KEY_ID=testkey -e AWS_SECRET_ACCESS_KEY=testsecret123 chrislusf/seaweedfs:4.48
+  $env:GEMINI_MCP_TEST_S3_ENDPOINT = "http://127.0.0.1:18333"
+  $env:GEMINI_MCP_TEST_S3_ACCESS_KEY = "testkey"
+  $env:GEMINI_MCP_TEST_S3_SECRET_KEY = "testsecret123"
+  dotnet test --project tests/GeminiMcp.Tests
+  ```
 - `global.json` 이 .NET 10 `dotnet test` 를 Microsoft.Testing.Platform 모드로 설정합니다.
 
 ## 구조
@@ -259,7 +292,9 @@ src/GeminiMcp/                MCP 서버 (.NET 10 Native AOT)
   Program.cs                  호스트, MCP 등록, Origin 검사, /skill·/health
   GeminiOptions.cs            설정(환경 변수)
   PathMapper.cs               호스트↔컨테이너 경로 변환
-  Gemini/                     Gemini REST(v1beta) 클라이언트, 미디어 변환, 응답 파싱, 출력 파일
+  Gemini/                     Gemini REST(v1beta) 클라이언트, 미디어 변환, 응답 파싱
+  Gemini/MediaStore.cs        생성 미디어 보관(TTL)·리소스·정리, 로컬 디스크 저장소
+  Gemini/S3MediaBackend.cs    S3 호환 저장소 (Signature V4 직접 구현, AOT)
   Tools/GeminiTools.cs        MCP 도구 9종
   Skill/                      내장 스킬 (SKILL.md + 리소스/프롬프트/설치)
 dashboard/                    대시보드 (Nuxt 4 + Vuetify 4 + TypeScript, Deno)

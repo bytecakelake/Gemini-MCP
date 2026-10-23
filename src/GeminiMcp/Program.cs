@@ -17,7 +17,12 @@ if (args.Contains("--help") || args.Contains("-h"))
 
         환경 변수:
           GEMINI_API_KEY          Gemini API 키 (필수, GOOGLE_API_KEY 도 인식)
-          GEMINI_MCP_OUTPUT_DIR   생성 파일 저장 폴더      (기본: ~/gemini-mcp-output)
+          GEMINI_MCP_OUTPUT_DIR   모델 선택 저장 폴더   (기본: ~/gemini-mcp-output)
+          GEMINI_MCP_MEDIA_TTL_HOURS  생성 미디어 보관 시간 (기본 48, Gemini Files API 와 같음). 지나면 자동 삭제
+          GEMINI_MCP_MEDIA_DIR    로컬 디스크 보관 폴더 (기본: <임시 폴더>/gemini-mcp-media)
+          GEMINI_MCP_S3_BUCKET    지정하면 S3 호환 저장소에 보관 (GEMINI_MCP_S3_ENDPOINT, _REGION,
+                                  _ACCESS_KEY, _SECRET_KEY, _PREFIX, _PATH_STYLE)
+          GEMINI_MCP_PUBLIC_URL   미디어 다운로드 URL 기준 주소 (기본: 요청 Host)
           MCP_ALLOWED_ORIGINS     허용할 브라우저 Origin (쉼표 구분, 기본은 localhost 만)
           GEMINI_MCP_PATH_MAPS    호스트=컨테이너 경로 매핑 (';' 구분, Docker 실행 시)
           ASPNETCORE_URLS         수신 주소 (기본: http://127.0.0.1:5100)
@@ -29,6 +34,7 @@ if (args.Contains("--help") || args.Contains("-h"))
 
         엔드포인트:
           POST /mcp     MCP Streamable HTTP
+          GET  /mcp/media/{name}  생성 미디어 다운로드 (보관 기간 내)
           GET  /skill   내장 스킬(SKILL.md)
           GET  /health  상태 확인
         """);
@@ -69,6 +75,13 @@ builder.Services.AddSingleton(_ => new HttpClient { Timeout = options.RequestTim
 builder.Services.AddSingleton<GeminiClient>();
 builder.Services.AddSingleton<MediaResolver>();
 builder.Services.AddSingleton<ModelCatalog>();
+if (options.S3 is { } s3)
+    builder.Services.AddSingleton<IMediaBackend>(sp => new S3MediaBackend(s3, sp.GetRequiredService<HttpClient>()));
+else
+    builder.Services.AddSingleton<IMediaBackend, LocalMediaBackend>();
+builder.Services.AddSingleton<MediaStore>();
+builder.Services.AddHostedService<MediaCleanupService>();
+builder.Services.AddHttpContextAccessor();
 
 // MCP 기본 직렬화 옵션 + 도구 인수 타입(string[] 등)용 소스 생성 컨텍스트 (AOT)
 var toolJson = new JsonSerializerOptions(McpJsonUtilities.DefaultOptions);
@@ -83,7 +96,8 @@ builder.Services
     .WithHttpTransport(http => http.Stateless = true)
     .WithTools<GeminiTools>(toolJson)
     .WithPrompts<SkillPrompts>()
-    .WithResources<SkillResources>();
+    .WithResources<SkillResources>()
+    .WithResources<MediaResources>();
 
 var app = builder.Build();
 
@@ -109,6 +123,15 @@ app.Use(async (context, next) =>
 });
 
 app.MapMcp("/mcp");
+// 생성 미디어 다운로드. /mcp/* 아래라서 게이트웨이(APISIX)에서 MCP 와 같은 API 키로 인증됩니다.
+app.MapGet(MediaStore.HttpPrefix + "{name}", async (string name, MediaStore store, HttpContext context, CancellationToken ct) =>
+{
+    var media = await store.OpenAsync(name, ct);
+    if (media is null)
+        return Results.Text("Media not found or expired", statusCode: StatusCodes.Status404NotFound);
+    context.Response.RegisterForDisposeAsync(media);
+    return Results.Stream(media.Content, media.MimeType, lastModified: media.LastModifiedUtc, enableRangeProcessing: media.Content.CanSeek);
+});
 app.MapGet("/", () => Results.Text(
     "Gemini MCP server is running.\nMCP endpoint: POST /mcp (Streamable HTTP)\nSkill: GET /skill\n", "text/plain; charset=utf-8"));
 app.MapGet("/health", () => Results.Text(options.ApiKey is null ? "ok (GEMINI_API_KEY missing)" : "ok"));

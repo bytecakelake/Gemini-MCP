@@ -1,6 +1,7 @@
 # Gemini MCP - Docker self-hosting helper (Windows PowerShell 5.1+ / PowerShell 7)
 #
-#   .\docker\docker.ps1 setup [-ShareDir C:\Users\me] [-Bind 127.0.0.1] [-Port 5100] [-Domain "localhost, 127.0.0.1"] [-Force]
+#   .\docker\docker.ps1 setup [-ShareDir C:\Users\me] [-Bind 127.0.0.1] [-Port 5100] [-Domain "localhost, 127.0.0.1"] [-S3] [-Force]
+#                                   -S3: store generated media in the bundled S3 container (SeaweedFS) instead of the shared folder
 #   .\docker\docker.ps1 up          # build + start (runs setup first if .env is missing), waits until healthy
 #   .\docker\docker.ps1 down        # stop and remove the containers
 #   .\docker\docker.ps1 restart
@@ -15,6 +16,7 @@ param(
     [string]$Bind,
     [int]$Port,
     [string]$Domain,
+    [switch]$S3,
     [switch]$Force
 )
 
@@ -56,11 +58,25 @@ function Invoke-Setup {
         -replace '(?m)^MCP_BIND=.*$', "MCP_BIND=$bindAddress" `
         -replace '(?m)^MCP_PORT=.*$', "MCP_PORT=$portNumber" `
         -replace '(?m)^MCP_DOMAIN=.*$', "MCP_DOMAIN=$domainNames"
+    if ($S3) {
+        # Bundled SeaweedFS: account and bucket are created on first start from these values.
+        $bytes = New-Object byte[] 16
+        [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+        $secret = -join ($bytes | ForEach-Object { $_.ToString("x2") })
+        $content = $content `
+            -replace '(?m)^COMPOSE_PROFILES=.*$', "COMPOSE_PROFILES=s3" `
+            -replace '(?m)^S3_ENDPOINT=.*$', "S3_ENDPOINT=http://s3:8333" `
+            -replace '(?m)^S3_BUCKET=.*$', "S3_BUCKET=gemini-media" `
+            -replace '(?m)^S3_ACCESS_KEY=.*$', "S3_ACCESS_KEY=gemini-mcp" `
+            -replace '(?m)^S3_SECRET_KEY=.*$', "S3_SECRET_KEY=$secret"
+    }
     [IO.File]::WriteAllText($envFile, $content, (New-Object Text.UTF8Encoding $false))
 
     Write-Host "Created $envFile"
     Write-Host "  shared folder : $share  ->  /share (outputs: $share\gemini-mcp-output)"
     Write-Host "  listen        : https://${bindAddress}:$portNumber  (TLS names: $domainNames)"
+    $mediaStore = if ($S3) { "bundled S3 (SeaweedFS), bucket gemini-media" } else { "$share\gemini-mcp-output\.media" }
+    Write-Host "  media store   : $mediaStore"
     if (-not (Test-Loopback $bindAddress) -and -not $Domain) {
         Write-Host "  note          : add this host's name/IP to MCP_DOMAIN in .env (or pass -Domain) so remote clients get a matching certificate"
     }

@@ -15,7 +15,8 @@ namespace GeminiMcp.Tools;
 /// 대용량 컨텍스트 분석, 다른 모델의 의견)을 Gemini 에 위임하는 MCP 도구 모음.
 /// </summary>
 [McpServerToolType]
-public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, ModelCatalog catalog, GeminiOptions options)
+public sealed class GeminiTools(
+    GeminiClient gemini, MediaResolver media, ModelCatalog catalog, MediaStore store, IHttpContextAccessor http, GeminiOptions options)
 {
     [McpServerTool(Name = "gemini_ask", Title = "Ask Gemini", ReadOnly = true, OpenWorld = true)]
     [Description("""
@@ -142,14 +143,14 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, ModelC
     [McpServerTool(Name = "gemini_generate_image", Title = "Generate / edit image", Destructive = false, OpenWorld = true)]
     [Description("""
         Gemini 이미지 모델(Nano Banana)로 이미지를 생성하거나, input_images 를 주면 기존 이미지를 편집/합성합니다.
-        결과는 PNG 등으로 저장되고 파일 경로를 반환합니다. return_image=true 면 이미지 자체도 응답에 포함합니다.
+        결과는 ResourceLink(gemini://media/...)로 반환되며 보관 기간(기본 48시간, Gemini Files API 와 같음)이 지나면 자동 삭제됩니다.
+        남기려면 그 전에 내려받아 저장하세요. return_image=true 면 이미지 자체도 응답에 포함합니다(토큰 사용 증가).
         """)]
     public async Task<CallToolResult> GenerateImageAsync(
         [Description("생성/편집 지시문 (구체적일수록 좋음: 피사체, 스타일, 구도, 조명, 텍스트)")] string prompt,
         [Description("편집/참조용 입력 이미지 경로 또는 URL")] string[]? input_images = null,
         [Description("가로세로 비율: 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, 2:3, 21:9 등")] string? aspect_ratio = null,
         [Description("해상도: 1K, 2K, 4K (지원 모델에서만)")] string? image_size = null,
-        [Description("저장 경로(파일 또는 폴더). 생략 시 기본 출력 폴더")] string? output_path = null,
         [Description("true 면 생성된 이미지를 응답에 포함 (토큰 사용 증가)")] bool return_image = false,
         [Description("이미지 모델 이름. 생략 시 선택된 image 모델")] string? model = null,
         CancellationToken cancellationToken = default)
@@ -176,13 +177,11 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, ModelC
             throw new McpException($"이미지가 생성되지 않았습니다. 모델 응답: {response.ToToolText(includeSources: false)}");
 
         var result = new CallToolResult { Content = [] };
-        var summary = new StringBuilder($"{images.Count}개의 이미지를 저장했습니다:\n");
+        var summary = new StringBuilder($"{images.Count}개의 이미지를 생성했습니다:\n");
         for (var i = 0; i < images.Count; i++)
         {
             var (mime, data) = images[i];
-            var path = OutputFiles.Resolve(options, output_path, "gemini-image", MimeTypes.ToExtension(mime), i);
-            await File.WriteAllBytesAsync(path, data, cancellationToken);
-            summary.Append($"- {options.Paths.ToHost(path)} ({mime}, {data.Length:N0} bytes)\n");
+            result.Content.Add(await PublishAsync(data, mime, summary, cancellationToken));
             if (return_image)
                 result.Content.Add(ImageContentBlock.FromBytes(data, mime));
         }
@@ -196,14 +195,14 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, ModelC
 
     [McpServerTool(Name = "gemini_text_to_speech", Title = "Text to speech", Destructive = false, OpenWorld = true)]
     [Description("""
-        Gemini TTS 로 텍스트를 자연스러운 음성(WAV, 24kHz mono)으로 합성해 파일로 저장합니다. 한국어 등 다국어를 지원합니다.
+        Gemini TTS 로 텍스트를 자연스러운 음성(WAV, 24kHz mono)으로 합성합니다. 한국어 등 다국어를 지원합니다.
         style 로 말투/감정(예: '밝고 경쾌하게', '차분한 뉴스 앵커처럼')을 지시할 수 있습니다.
+        결과는 ResourceLink(gemini://media/...)로 반환되며 보관 기간(기본 48시간)이 지나면 자동 삭제됩니다. 남기려면 그 전에 내려받아 저장하세요.
         """)]
-    public async Task<string> TextToSpeechAsync(
+    public async Task<CallToolResult> TextToSpeechAsync(
         [Description("읽을 텍스트")] string text,
         [Description("음성 이름: Kore, Puck, Charon, Fenrir, Aoede, Leda, Orus, Zephyr 등 (기본 Kore)")] string? voice = null,
         [Description("말투/감정/속도 지시")] string? style = null,
-        [Description("저장 경로(파일 또는 폴더). 생략 시 기본 출력 폴더")] string? output_path = null,
         [Description("TTS 모델 이름. 생략 시 선택된 tts 모델")] string? model = null,
         CancellationToken cancellationToken = default)
     {
@@ -227,20 +226,21 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, ModelC
 
         var isPcm = audio.MimeType.Contains("L16", StringComparison.OrdinalIgnoreCase) || audio.MimeType.Contains("pcm", StringComparison.OrdinalIgnoreCase);
         var bytes = isPcm ? OutputFiles.PcmToWav(audio.Data, audio.MimeType) : audio.Data;
-        var path = OutputFiles.Resolve(options, output_path, "gemini-speech", isPcm ? ".wav" : MimeTypes.ToExtension(audio.MimeType));
-        await File.WriteAllBytesAsync(path, bytes, cancellationToken);
-
         var seconds = isPcm ? audio.Data.Length / 2.0 / 24000 : (double?)null;
-        return $"음성을 저장했습니다: {options.Paths.ToHost(path)} ({bytes.Length:N0} bytes{(seconds is null ? "" : $", 약 {seconds:F1}초")})\n[gemini model={response.Model}]";
+        var summary = new StringBuilder($"음성을 합성했습니다{(seconds is null ? "" : $" (약 {seconds:F1}초)")}:\n");
+        var link = await PublishAsync(bytes, isPcm ? "audio/wav" : audio.MimeType, summary, cancellationToken);
+        summary.Append($"\n[gemini model={response.Model}]");
+        return new CallToolResult { Content = [new TextContentBlock { Text = summary.ToString() }, link] };
     }
 
     [McpServerTool(Name = "gemini_generate_video", Title = "Generate / edit video", Destructive = false, OpenWorld = true)]
     [Description("""
         Gemini 영상 모델(기본 gemini-omni-1.1-flash)로 텍스트·이미지에서 영상(MP4, 오디오 포함)을 생성하거나,
         input_video 또는 previous_interaction_id 로 기존 영상을 편집/연장합니다. 생성에는 수 분이 걸릴 수 있습니다.
-        결과는 파일로 저장되고 경로와 interaction_id 를 반환합니다. 이어서 수정하려면 그 id 를 previous_interaction_id 로 넘기세요.
+        결과는 ResourceLink(gemini://media/...)와 interaction_id 로 반환되며 보관 기간(기본 48시간)이 지나면 자동 삭제됩니다. 남기려면 그 전에 내려받아 저장하세요.
+        이어서 수정하려면 그 id 를 previous_interaction_id 로 넘기세요.
         """)]
-    public async Task<string> GenerateVideoAsync(
+    public async Task<CallToolResult> GenerateVideoAsync(
         [Description("영상 지시문: 피사체, 동작, 카메라 움직임, 스타일, 대사/소리. 넣지 말아야 할 것도 문장으로 적습니다")] string prompt,
         [Description("시작 프레임/참조용 이미지 경로 또는 URL")] string[]? input_images = null,
         [Description("편집/연장할 영상 경로 또는 URL (업로드 영상은 10초 이하)")] string? input_video = null,
@@ -248,7 +248,6 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, ModelC
         [Description("작업 유형 힌트: text_to_video, image_to_video, reference_to_video, edit, extend (보통 생략)")] string? task = null,
         [Description("가로세로 비율: 16:9(기본) 또는 9:16")] string? aspect_ratio = null,
         [Description("해상도: 360p, 720p(기본), 1080p, 4k")] string? resolution = null,
-        [Description("저장 경로(파일 또는 폴더). 생략 시 기본 출력 폴더")] string? output_path = null,
         [Description("영상 모델 이름. 생략 시 선택된 video 모델")] string? model = null,
         CancellationToken cancellationToken = default)
     {
@@ -312,16 +311,14 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, ModelC
             : await gemini.DownloadGeneratedFileAsync(
                 video["uri"]?.GetValue<string>() ?? throw new McpException("영상 응답에 data 와 uri 가 모두 없습니다."), cancellationToken);
 
-        var path = OutputFiles.Resolve(options, output_path, "gemini-video", MimeTypes.ToExtension(mime));
-        await File.WriteAllBytesAsync(path, bytes, cancellationToken);
-
-        var sb = new StringBuilder($"영상을 저장했습니다: {options.Paths.ToHost(path)} ({mime}, {bytes.Length:N0} bytes)\n");
+        var sb = new StringBuilder("영상을 생성했습니다:\n");
+        var link = await PublishAsync(bytes, mime, sb, cancellationToken);
         if (id is not null)
             sb.Append($"interaction_id: {id} (previous_interaction_id 로 넘기면 이 영상을 이어서 편집/연장합니다)\n");
         if (comment.Length > 0)
             sb.Append($"\n모델 코멘트: {comment}\n");
         sb.Append($"\n[gemini model={interaction["model"]?.GetValue<string>() ?? resolved}]");
-        return sb.ToString();
+        return new CallToolResult { Content = [new TextContentBlock { Text = sb.ToString() }, link] };
     }
 
     [McpServerTool(Name = "gemini_list_models", Title = "List Gemini models", ReadOnly = true, Idempotent = true, OpenWorld = true)]
@@ -499,6 +496,41 @@ public sealed class GeminiTools(GeminiClient gemini, MediaResolver media, ModelC
     [McpServerTool(Name = "gemini_usage_guide", Title = "Gemini MCP usage guide (skill)", ReadOnly = true, Idempotent = true)]
     [Description("이 서버의 내장 스킬(사용 설명서)을 반환합니다. 어떤 상황에 어떤 Gemini 도구를 써야 하는지 모를 때 먼저 호출하세요.")]
     public static string UsageGuide() => SkillContent.Markdown;
+
+    /// <summary>생성 미디어를 임시 보관소에 쓰고 ResourceLink 를 돌려줍니다.</summary>
+    private async Task<ResourceLinkBlock> PublishAsync(byte[] data, string mimeType, StringBuilder summary, CancellationToken ct)
+    {
+        var item = await store.SaveAsync(data, mimeType, ct);
+        summary.Append($"- {item.Uri} ({mimeType}, {data.Length:N0} bytes, {item.ExpiresAt.ToLocalTime():yyyy-MM-dd HH:mm} 까지 보관)\n");
+        if (DownloadUrl(item) is { } url)
+            summary.Append($"  다운로드: {url} (MCP 와 같은 API 키로 인증)\n");
+
+        // 로컬 디스크 저장소이고 클라이언트가 직접 열 수 있을 때(로컬 실행 또는 공유 폴더)만 경로를 알려 줍니다.
+        if (item.LocalPath is { } local && options.Paths.ToHost(local) is var host && (!options.Paths.IsEnabled || host != local))
+            summary.Append($"  임시 파일: {host}\n");
+
+        var ttl = store.Ttl.TotalHours >= 1 ? $"{store.Ttl.TotalHours:0.#}시간" : $"{store.Ttl.TotalMinutes:0}분";
+        summary.Append(
+            $"  ⚠ 주의: 이 미디어는 임시 보관본이라 {ttl} 뒤({item.ExpiresAt.ToLocalTime():yyyy-MM-dd HH:mm}) 자동 삭제되며 복구할 수 없습니다.\n"
+            + "    사용자에게 전달하거나 나중에 다시 쓸 예정이면 그 전에 resources/read 또는 다운로드 URL 로 받아 클라이언트 쪽에 저장하세요.\n"
+            + "    삭제 후에는 이 URI 를 다른 도구에 넘겨도 실패합니다.\n");
+        return item.ToResourceLink(
+            $"Gemini 생성 미디어. {item.ExpiresAt.ToLocalTime():yyyy-MM-dd HH:mm} 에 자동 삭제됩니다. 남기려면 그 전에 내려받아 저장하세요.");
+    }
+
+    private string? DownloadUrl(MediaItem item)
+    {
+        var baseUrl = options.PublicUrl;
+        if (baseUrl is null && http.HttpContext?.Request is { } request)
+        {
+            // 게이트웨이(Caddy → APISIX) 뒤에서는 전달 헤더의 원래 주소를 씁니다.
+            var proto = request.Headers["X-Forwarded-Proto"].FirstOrDefault()?.Split(',')[0].Trim() ?? request.Scheme;
+            var hostHeader = request.Headers["X-Forwarded-Host"].FirstOrDefault()?.Split(',')[0].Trim() ?? request.Host.Value;
+            if (!string.IsNullOrEmpty(hostHeader))
+                baseUrl = $"{proto}://{hostHeader}";
+        }
+        return baseUrl is null ? null : baseUrl + MediaStore.HttpPrefix + item.Name;
+    }
 
     private async Task<JsonArray> BuildPartsAsync(string prompt, string[]? files, CancellationToken ct)
     {
