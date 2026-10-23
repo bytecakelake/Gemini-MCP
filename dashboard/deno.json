@@ -1,0 +1,10 @@
+{
+  "nodeModulesDir": "auto",
+  "tasks": {
+    "dev": "deno run -A npm:nuxt@4.6.1 dev",
+    "build": "deno run -A npm:nuxt@4.6.1 build",
+    "typecheck": "deno run -A npm:nuxt@4.6.1 typecheck",
+    "prepare": "deno run -A npm:nuxt@4.6.1 prepare",
+    "start": "deno run --allow-net --allow-read --allow-env --unstable-byonm --unstable-node-globals .output/server/index.mjs"
+  }
+}

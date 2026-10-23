@@ -22,10 +22,11 @@ if (args.Contains("--help") || args.Contains("-h"))
           GEMINI_IMAGE_MODEL      이미지 생성 모델         (기본: gemini-3.1-flash-image)
           GEMINI_TTS_MODEL        음성 합성 모델           (기본: gemini-2.5-flash-preview-tts)
           GEMINI_MCP_OUTPUT_DIR   생성 파일 저장 폴더      (기본: ~/gemini-mcp-output)
-          MCP_AUTH_TOKEN          설정 시 Authorization: Bearer <token> 요구
           MCP_ALLOWED_ORIGINS     허용할 브라우저 Origin (쉼표 구분, 기본은 localhost 만)
           GEMINI_MCP_PATH_MAPS    호스트=컨테이너 경로 매핑 (';' 구분, Docker 실행 시)
           ASPNETCORE_URLS         수신 주소 (기본: http://127.0.0.1:5100)
+
+        인증은 하지 않습니다. 루프백/내부 네트워크에만 노출하고, 외부 접속은 gateway(API 키 인증)를 거치게 하세요.
 
         엔드포인트:
           POST /mcp     MCP Streamable HTTP
@@ -90,7 +91,7 @@ var allowedOrigins = (builder.Configuration["MCP_ALLOWED_ORIGINS"] ?? "")
     .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
     .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-// 보안: DNS 리바인딩 방지를 위한 Origin 검사 + 선택적 Bearer 토큰 인증 (MCP 사양 권고사항)
+// 보안: DNS 리바인딩 방지를 위한 Origin 검사 (MCP 사양 권고사항). API 키 인증은 앞단 gateway 가 담당합니다.
 app.Use(async (context, next) =>
 {
     if (context.Request.Path.StartsWithSegments("/mcp"))
@@ -101,14 +102,6 @@ app.Use(async (context, next) =>
         {
             context.Response.StatusCode = StatusCodes.Status403Forbidden;
             await context.Response.WriteAsync("Origin not allowed");
-            return;
-        }
-
-        if (options.AuthToken is not null
-            && context.Request.Headers.Authorization.ToString() != $"Bearer {options.AuthToken}")
-        {
-            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            context.Response.Headers.WWWAuthenticate = "Bearer";
             return;
         }
     }

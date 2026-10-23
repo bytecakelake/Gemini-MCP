@@ -1,18 +1,20 @@
 # Gemini MCP - Docker self-hosting helper (Windows PowerShell 5.1+ / PowerShell 7)
 #
-#   .\docker\docker.ps1 setup [-ShareDir C:\Users\me] [-Bind 127.0.0.1] [-Port 5100] [-WithToken] [-Force]
-#   .\docker\docker.ps1 up        # build + start (runs setup first if .env is missing), waits until healthy
-#   .\docker\docker.ps1 down      # stop and remove the container
+#   .\docker\docker.ps1 setup [-ShareDir C:\Users\me] [-Bind 127.0.0.1] [-Port 5100] [-Domain "localhost, 127.0.0.1"] [-Force]
+#   .\docker\docker.ps1 up          # build + start (runs setup first if .env is missing), waits until healthy
+#   .\docker\docker.ps1 down        # stop and remove the containers
 #   .\docker\docker.ps1 restart
-#   .\docker\docker.ps1 rebuild   # rebuild the image without cache and restart
-#   .\docker\docker.ps1 logs      # follow logs
-#   .\docker\docker.ps1 status    # container state, health and connection info
+#   .\docker\docker.ps1 rebuild     # rebuild the images without cache and restart
+#   .\docker\docker.ps1 logs        # follow logs
+#   .\docker\docker.ps1 status      # container state, health and connection info
+#   .\docker\docker.ps1 cert        # export the Caddy local CA root certificate (MCP_TLS=internal) to docker\caddy-root.crt
+#   .\docker\docker.ps1 reset-admin # forgot the dashboard password: delete the admin account; a new setup code is logged
 param(
-    [Parameter(Position = 0)][ValidateSet("setup", "up", "down", "restart", "rebuild", "logs", "status")][string]$Command = "up",
+    [Parameter(Position = 0)][ValidateSet("setup", "up", "down", "restart", "rebuild", "logs", "status", "cert", "reset-admin")][string]$Command = "up",
     [string]$ShareDir,
     [string]$Bind,
     [int]$Port,
-    [switch]$WithToken,
+    [string]$Domain,
     [switch]$Force
 )
 
@@ -21,7 +23,10 @@ param(
 $ErrorActionPreference = "Continue"
 $root = $PSScriptRoot  # docker/ folder: compose file, .env, .env.example
 $envFile = Join-Path $root ".env"
-$container = "gemini-mcp"
+$healthChecked = @("gemini-mcp", "gemini-mcp-dashboard", "gemini-mcp-gateway")
+$gateway = "gemini-mcp-gateway"
+$proxy = "gemini-mcp-caddy"
+$caFile = Join-Path $root "caddy-root.crt"
 
 function Read-DotEnv {
     $values = @{}
@@ -31,12 +36,6 @@ function Read-DotEnv {
         }
     }
     $values
-}
-
-function New-Token {
-    $bytes = New-Object byte[] 32
-    [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
-    -join ($bytes | ForEach-Object { $_.ToString("x2") })
 }
 
 function Test-Loopback([string]$address) { (-not $address) -or $address -in @("127.0.0.1", "localhost", "::1", "[::1]") }
@@ -49,20 +48,22 @@ function Invoke-Setup {
     $share = if ($ShareDir) { (Resolve-Path $ShareDir -ErrorAction Stop).Path } else { [Environment]::GetFolderPath("UserProfile") }
     $bindAddress = if ($Bind) { $Bind } else { "127.0.0.1" }
     $portNumber = if ($Port) { $Port } else { 5100 }
-    $token = if ($WithToken -or -not (Test-Loopback $bindAddress)) { New-Token } else { "" }
+    $domainNames = if ($Domain) { $Domain } else { "localhost, 127.0.0.1" }
 
     $template = [IO.File]::ReadAllText((Join-Path $root ".env.example"))
     $content = $template `
         -replace '(?m)^HOST_SHARE_DIR=.*$', "HOST_SHARE_DIR=$share" `
         -replace '(?m)^MCP_BIND=.*$', "MCP_BIND=$bindAddress" `
         -replace '(?m)^MCP_PORT=.*$', "MCP_PORT=$portNumber" `
-        -replace '(?m)^MCP_AUTH_TOKEN=.*$', "MCP_AUTH_TOKEN=$token"
+        -replace '(?m)^MCP_DOMAIN=.*$', "MCP_DOMAIN=$domainNames"
     [IO.File]::WriteAllText($envFile, $content, (New-Object Text.UTF8Encoding $false))
 
     Write-Host "Created $envFile"
     Write-Host "  shared folder : $share  ->  /share (outputs: $share\gemini-mcp-output)"
-    Write-Host "  listen        : ${bindAddress}:$portNumber"
-    if ($token) { Write-Host "  auth token    : generated (MCP_AUTH_TOKEN in .env)" }
+    Write-Host "  listen        : https://${bindAddress}:$portNumber  (TLS names: $domainNames)"
+    if (-not (Test-Loopback $bindAddress) -and -not $Domain) {
+        Write-Host "  note          : add this host's name/IP to MCP_DOMAIN in .env (or pass -Domain) so remote clients get a matching certificate"
+    }
 }
 
 function Assert-Docker {
@@ -80,17 +81,41 @@ function Set-ApiKey($cfg, [switch]$Optional) {
 }
 
 function Wait-Healthy {
-    Write-Host -NoNewline "Waiting for container health"
-    for ($i = 0; $i -lt 60; $i++) {
-        $state = docker inspect -f "{{.State.Health.Status}}" $container 2>$null
-        if ($state -eq "healthy") { Write-Host " -> healthy"; return }
-        if ($state -eq "unhealthy") { break }
-        Write-Host -NoNewline "."
+    foreach ($name in $healthChecked) {
+        Write-Host -NoNewline "Waiting for $name"
+        $state = ""
+        for ($i = 0; $i -lt 90; $i++) {
+            $state = docker inspect -f "{{.State.Health.Status}}" $name 2>$null
+            if ($state -eq "healthy" -or $state -eq "unhealthy") { break }
+            Write-Host -NoNewline "."
+            Start-Sleep -Seconds 1
+        }
+        if ($state -ne "healthy") {
+            Write-Host ""
+            docker logs --tail 50 $name
+            throw "$name did not become healthy (state: $state)."
+        }
+        Write-Host " -> healthy"
+    }
+}
+
+function Wait-Proxy {
+    for ($i = 0; $i -lt 30; $i++) {
+        $state = docker inspect -f "{{.State.Status}}" $proxy 2>$null
+        if ($state -eq "running") { return }
         Start-Sleep -Seconds 1
     }
-    Write-Host ""
-    docker logs --tail 50 $container
-    throw "Container did not become healthy (state: $state)."
+    docker logs --tail 50 $proxy
+    throw "Caddy proxy is not running (state: $state)."
+}
+
+# MCP_TLS=internal: clients must trust Caddy's local CA. It lives in the caddy-data volume, so it survives restarts.
+function Export-Cert {
+    docker cp "${proxy}:/data/caddy/pki/authorities/local/root.crt" $caFile *> $null
+    if ($LASTEXITCODE -ne 0) { throw "Could not export the root certificate (is the proxy running with MCP_TLS=internal?)." }
+    Write-Host "Exported Caddy root CA: $caFile"
+    Write-Host "Trust it for Claude Code (Node.js) : `$env:NODE_EXTRA_CA_CERTS = `"$caFile`"  (or set it as a user environment variable)"
+    Write-Host "Trust it in the Windows user store : certutil -user -addstore Root `"$caFile`""
 }
 
 # Same precedence as docker compose: shell environment first, then .env, then default.
@@ -100,20 +125,31 @@ function Get-Setting([string]$name, [string]$default) {
     if ($value) { $value } else { $default }
 }
 
+# The gateway prints a one-time setup code while no dashboard admin exists (no shell in the image, so ask it with deno eval).
+function Show-SetupCode {
+    $state = docker exec $gateway deno eval "const r = await fetch('http://127.0.0.1:8080/api/admin/auth/state'); console.log((await r.json()).setupRequired)" 2>$null
+    if ($state -ne "true") { return }
+    $code = docker logs $gateway 2>&1 | Select-String -Pattern "Dashboard setup code: (\S+)" | Select-Object -Last 1
+    if ($code) {
+        Write-Host "Setup code   : $($code.Matches[0].Groups[1].Value)  (create the dashboard admin password with it)"
+    }
+}
+
 function Show-Connection {
     $bindAddress = Get-Setting "MCP_BIND" "127.0.0.1"
     $host_ = if ($bindAddress -eq "0.0.0.0") { "<this-host>" } else { $bindAddress }
     $portNumber = Get-Setting "MCP_PORT" "5100"
-    $url = "http://${host_}:$portNumber/mcp"
+    $base = "https://${host_}:$portNumber"
     Write-Host ""
-    Write-Host "MCP endpoint : $url"
-    Write-Host "Skill        : http://${host_}:$portNumber/skill"
-    Write-Host "Register in Claude Code:"
-    if (Get-Setting "MCP_AUTH_TOKEN" "") {
-        Write-Host "  claude mcp add --transport http gemini $url --header `"Authorization: Bearer <MCP_AUTH_TOKEN from .env>`""
-    } else {
-        Write-Host "  claude mcp add --transport http gemini $url"
+    Write-Host "Dashboard    : $base/   (logs, monitoring, API keys)"
+    Show-SetupCode
+    Write-Host "MCP endpoint : $base/mcp   (Authorization: Bearer <API key issued in the dashboard>)"
+    Write-Host "Skill        : $base/skill"
+    if ((Get-Setting "MCP_TLS" "internal") -eq "internal") {
+        Write-Host "TLS          : Caddy local CA (run '.\docker\docker.ps1 cert' to export the root certificate for clients)"
     }
+    Write-Host "Register in Claude Code:"
+    Write-Host "  claude mcp add --transport http gemini $base/mcp --header `"Authorization: Bearer <API key>`""
 }
 
 function Invoke-Compose([string[]]$composeArgs) {
@@ -127,27 +163,33 @@ function Invoke-Compose([string[]]$composeArgs) {
 function Invoke-Up([string[]]$buildArgs) {
     Assert-Docker
     if (-not (Test-Path $envFile)) { Invoke-Setup }
-    $bindAddress = Get-Setting "MCP_BIND" ""
-    if (-not (Test-Loopback $bindAddress) -and -not (Get-Setting "MCP_AUTH_TOKEN" "")) {
-        throw "MCP_BIND=$bindAddress exposes the server beyond this machine; set MCP_AUTH_TOKEN in .env first."
-    }
     Set-ApiKey (Read-DotEnv)
     if ($buildArgs) { Invoke-Compose (@("build") + $buildArgs) }
     Invoke-Compose @("up", "-d", "--build")
     Wait-Healthy
+    Wait-Proxy
     Show-Connection
 }
 
+function Invoke-ResetAdmin {
+    Assert-Docker
+    docker exec $gateway deno run --allow-env --allow-read=/data --allow-write=/data main.ts --reset-admin
+    if ($LASTEXITCODE -ne 0) { throw "reset-admin failed (is $gateway running?)" }
+    Show-SetupCode
+}
+
 switch ($Command) {
-    "setup"   { Invoke-Setup }
-    "up"      { Invoke-Up @() }
-    "rebuild" { Invoke-Up @("--no-cache", "--pull") }
-    "down"    { Assert-Docker; Set-ApiKey (Read-DotEnv) -Optional; Invoke-Compose @("down") }
-    "restart" { Assert-Docker; Set-ApiKey (Read-DotEnv); Invoke-Compose @("restart"); Wait-Healthy }
-    "logs"    { Assert-Docker; Set-ApiKey (Read-DotEnv) -Optional; Invoke-Compose @("logs", "-f", "--tail", "200") }
-    "status"  {
+    "setup"       { Invoke-Setup }
+    "up"          { Invoke-Up @() }
+    "rebuild"     { Invoke-Up @("--no-cache", "--pull") }
+    "down"        { Assert-Docker; Set-ApiKey (Read-DotEnv) -Optional; Invoke-Compose @("down") }
+    "restart"     { Assert-Docker; Set-ApiKey (Read-DotEnv); Invoke-Compose @("restart"); Wait-Healthy; Wait-Proxy; Show-Connection }
+    "cert"        { Assert-Docker; Export-Cert }
+    "logs"        { Assert-Docker; Set-ApiKey (Read-DotEnv) -Optional; Invoke-Compose @("logs", "-f", "--tail", "200") }
+    "reset-admin" { Invoke-ResetAdmin }
+    "status"      {
         Assert-Docker
-        docker ps -a --filter "name=^$container$" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}\t{{.Image}}"
+        docker ps -a --filter "name=^gemini-mcp" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}\t{{.Image}}"
         Show-Connection
     }
 }

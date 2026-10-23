@@ -13,7 +13,6 @@ public sealed class GeminiOptions
     public required string ImageModel { get; init; }
     public required string TtsModel { get; init; }
     public required string OutputDirectory { get; init; }
-    public required string? AuthToken { get; init; }
     public required long InlineLimitBytes { get; init; }
     public required TimeSpan RequestTimeout { get; init; }
     public required PathMapper Paths { get; init; }
@@ -43,7 +42,6 @@ public sealed class GeminiOptions
             ImageModel = Get("GEMINI_IMAGE_MODEL", "Gemini:ImageModel") ?? "gemini-3.1-flash-image",
             TtsModel = Get("GEMINI_TTS_MODEL", "Gemini:TtsModel") ?? "gemini-2.5-flash-preview-tts",
             OutputDirectory = Get("GEMINI_MCP_OUTPUT_DIR", "Gemini:OutputDirectory") ?? defaultOutput,
-            AuthToken = Get("MCP_AUTH_TOKEN", "Mcp:AuthToken"),
             InlineLimitBytes = long.TryParse(Get("GEMINI_INLINE_LIMIT_BYTES"), out var limit) ? limit : 15 * 1024 * 1024,
             RequestTimeout = TimeSpan.FromSeconds(
                 int.TryParse(Get("GEMINI_TIMEOUT_SECONDS"), out var seconds) ? seconds : 600),

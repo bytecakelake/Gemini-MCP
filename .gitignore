@@ -5,3 +5,4 @@ publish/
 .vs/
 TestResults/
 .env
+docker/caddy-root.crt

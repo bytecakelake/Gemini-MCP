@@ -4,7 +4,7 @@ using GeminiMcp.Tests.Infrastructure;
 
 namespace GeminiMcp.Tests;
 
-/// <summary>MCP 외 HTTP 엔드포인트와 보안 미들웨어(토큰, Origin) 검증.</summary>
+/// <summary>MCP 외 HTTP 엔드포인트와 보안 검사(Origin, gateway API 키) 검증.</summary>
 [Collection(ServerCollection.Name)]
 public sealed class HttpEndpointTests(DefaultServer server)
 {
@@ -30,32 +30,32 @@ public sealed class HttpEndpointTests(DefaultServer server)
     }
 
     [Fact]
-    public async Task Mcp_WithoutToken_Returns401()
+    public async Task Mcp_ViaGateway_WithoutKey_Returns401()
     {
-        Assert.SkipWhen(server.AuthToken is null, "Server has no MCP_AUTH_TOKEN configured.");
+        Assert.SkipUnless(server.GatewayKey is not null, "Not running against the gateway (GEMINI_MCP_API_KEY unset).");
         using var response = await PostMcpAsync(authorization: null, origin: null);
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
     [Fact]
-    public async Task Mcp_WithWrongToken_Returns401()
+    public async Task Mcp_ViaGateway_WithUnknownKey_Returns401()
     {
-        Assert.SkipWhen(server.AuthToken is null, "Server has no MCP_AUTH_TOKEN configured.");
-        using var response = await PostMcpAsync(authorization: "Bearer wrong", origin: null);
+        Assert.SkipUnless(server.GatewayKey is not null, "Not running against the gateway (GEMINI_MCP_API_KEY unset).");
+        using var response = await PostMcpAsync(authorization: "Bearer gmcp_unknown", origin: null);
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
     [Fact]
     public async Task Mcp_FromForeignOrigin_Returns403()
     {
-        using var response = await PostMcpAsync(Bearer(server.AuthToken), origin: "https://evil.example");
+        using var response = await PostMcpAsync(Bearer(server.GatewayKey), origin: "https://evil.example");
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
 
     [Fact]
     public async Task Mcp_FromLocalhostOrigin_IsAllowed()
     {
-        using var response = await PostMcpAsync(Bearer(server.AuthToken), origin: "http://localhost:3000");
+        using var response = await PostMcpAsync(Bearer(server.GatewayKey), origin: "http://localhost:3000");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 

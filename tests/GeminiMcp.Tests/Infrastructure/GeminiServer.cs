@@ -13,7 +13,7 @@ namespace GeminiMcp.Tests.Infrastructure;
 ///
 /// 외부 서버 모드: GEMINI_MCP_URL 을 지정하면 프로세스를 띄우지 않고 이미 실행 중인 서버(예: Docker 컨테이너)를 검증합니다.
 ///   GEMINI_MCP_URL              서버 주소 (예: http://127.0.0.1:5100)
-///   GEMINI_MCP_TOKEN            서버의 MCP_AUTH_TOKEN (없으면 인증 테스트는 건너뜀)
+///   GEMINI_MCP_API_KEY          gateway 대시보드에서 발급한 API 키 (gateway 를 거칠 때 필수)
 ///   GEMINI_MCP_TEST_OUTPUT_DIR  서버 출력 폴더의 호스트 경로 (Docker: HOST_SHARE_DIR\gemini-mcp-output)
 /// </summary>
 public abstract class GeminiServer : IAsyncLifetime
@@ -27,19 +27,19 @@ public abstract class GeminiServer : IAsyncLifetime
         _externalUrl = AllowExternal ? Environment.GetEnvironmentVariable("GEMINI_MCP_URL") : null;
         if (IsExternal)
         {
-            AuthToken = NullIfEmpty(Environment.GetEnvironmentVariable("GEMINI_MCP_TOKEN"));
+            GatewayKey = NullIfEmpty(Environment.GetEnvironmentVariable("GEMINI_MCP_API_KEY"));
             OutputDirectory = NullIfEmpty(Environment.GetEnvironmentVariable("GEMINI_MCP_TEST_OUTPUT_DIR"))
                 ?? throw new InvalidOperationException("GEMINI_MCP_TEST_OUTPUT_DIR is required with GEMINI_MCP_URL.");
         }
         else
         {
-            AuthToken = "test-token";
             OutputDirectory = Path.Combine(Path.GetTempPath(), "gemini-mcp-tests", Guid.NewGuid().ToString("N"));
         }
     }
 
     public bool IsExternal => _externalUrl is not null;
-    public string? AuthToken { get; }
+    /// <summary>gateway 를 거치는 외부 서버 모드에서 쓰는 API 키. 로컬 프로세스는 인증하지 않습니다.</summary>
+    public string? GatewayKey { get; }
     public Uri BaseUri { get; private set; } = null!;
     public Uri McpEndpoint => new(BaseUri, "/mcp");
     /// <summary>서버가 생성 파일을 저장하는 폴더 (테스트 PC 기준 경로).</summary>
@@ -76,7 +76,6 @@ public abstract class GeminiServer : IAsyncLifetime
             CreateNoWindow = true,
         };
         psi.Environment["GEMINI_MCP_OUTPUT_DIR"] = OutputDirectory;
-        psi.Environment["MCP_AUTH_TOKEN"] = AuthToken!;
         if (ApiKey is not null)
             psi.Environment["GEMINI_API_KEY"] = ApiKey;
         foreach (var (key, value) in ExtraEnvironment)
@@ -136,7 +135,7 @@ public abstract class GeminiServer : IAsyncLifetime
             {
                 Endpoint = McpEndpoint,
                 TransportMode = HttpTransportMode.StreamableHttp,
-                AdditionalHeaders = AuthToken is null ? null : new Dictionary<string, string> { ["Authorization"] = $"Bearer {AuthToken}" },
+                AdditionalHeaders = GatewayKey is null ? null : new Dictionary<string, string> { ["Authorization"] = $"Bearer {GatewayKey}" },
             }),
             new McpClientOptions
             {
