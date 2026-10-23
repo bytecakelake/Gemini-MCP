@@ -1,9 +1,10 @@
 # Gemini MCP - Docker self-hosting helper (Windows PowerShell 5.1+ / PowerShell 7)
 #
 #   .\docker\docker.ps1 setup [-ShareDir C:\Users\me] [-Bind 127.0.0.1] [-Port 5100] [-Domain "localhost, 127.0.0.1"]
-#                                   [-TlsCert fullchain.pem -TlsKey privkey.pem] [-Force]
+#                                   [-TlsCert fullchain.pem -TlsKey privkey.pem] [-BundledS3] [-Force]
 #                                   -TlsCert/-TlsKey: use certificate files prepared by the server admin instead of MCP_TLS
-#                                   Generated media goes to the bundled S3 container (SeaweedFS); see .env.example for external S3.
+#                                   -BundledS3: also run the bundled S3 container (docker-compose.s3.yml) for generated media.
+#                                   Without it, set S3_* in .env for an external S3 (see .env.example).
 #   .\docker\docker.ps1 up          # build + start (runs setup first if .env is missing), waits until healthy
 #   .\docker\docker.ps1 down        # stop and remove the containers
 #   .\docker\docker.ps1 restart
@@ -20,6 +21,7 @@ param(
     [string]$Domain,
     [string]$TlsCert,
     [string]$TlsKey,
+    [switch]$BundledS3,
     [switch]$Force
 )
 
@@ -51,26 +53,19 @@ function New-Secret {
     -join ($bytes | ForEach-Object { $_.ToString("x2") })
 }
 
-# .env files created before media moved to S3 have no S3_SECRET_KEY: switch them to the bundled S3
-# (generated secret, COMPOSE_PROFILES=s3). An empty secret always means the bundled store, since external S3 needs one.
+# The bundled S3 moved from the "s3" compose profile to docker-compose.s3.yml: .env files that enabled the profile
+# get COMPOSE_FILE instead, so the same store keeps running.
 function Update-MediaStoreSettings {
-    if (-not (Test-Path $envFile) -or $env:S3_SECRET_KEY) { return }
+    if (-not (Test-Path $envFile)) { return }
     $cfg = Read-DotEnv
-    if ($cfg["S3_SECRET_KEY"]) { return }
-    $lines = [Collections.Generic.List[string]]::new([IO.File]::ReadAllLines($envFile))
-    function Set-Line([string]$name, [string]$value) {
-        $index = $lines.FindIndex({ param($l) $l -match "^\s*$name\s*=" })
-        if ($index -ge 0) { $lines[$index] = "$name=$value" } else { $lines.Add("$name=$value") }
-    }
-    if ($lines.FindIndex({ param($l) $l -match '^\s*S3_SECRET_KEY\s*=' }) -lt 0) {
-        $lines.Add("")
-        $lines.Add("# Generated media store (added by docker.ps1): bundled S3 (SeaweedFS). See .env.example for external S3.")
-    }
     $profiles = @(($cfg["COMPOSE_PROFILES"] -split ",") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-    if ($profiles -notcontains "s3") { Set-Line "COMPOSE_PROFILES" ((@($profiles) + "s3") -join ",") }
-    Set-Line "S3_SECRET_KEY" (New-Secret)
+    if ($profiles -notcontains "s3" -or $cfg["COMPOSE_FILE"]) { return }
+    $lines = [Collections.Generic.List[string]]::new([IO.File]::ReadAllLines($envFile))
+    $index = $lines.FindIndex({ param($l) $l -match '^\s*COMPOSE_PROFILES\s*=' })
+    $lines[$index] = "COMPOSE_PROFILES=" + (@($profiles | Where-Object { $_ -ne "s3" }) -join ",")
+    $lines.InsertRange($index + 1, [string[]]@("COMPOSE_PATH_SEPARATOR=:", "COMPOSE_FILE=docker-compose.yml:docker-compose.s3.yml"))
     [IO.File]::WriteAllLines($envFile, $lines, (New-Object Text.UTF8Encoding $false))
-    Write-Host "Updated $envFile : generated media now goes to the bundled S3 container (S3_SECRET_KEY generated)."
+    Write-Host "Updated $envFile : the bundled S3 now comes from docker-compose.s3.yml (COMPOSE_FILE)."
 }
 
 function Invoke-Setup {
@@ -93,15 +88,23 @@ function Invoke-Setup {
         -replace '(?m)^MCP_PORT=.*$', "MCP_PORT=$portNumber" `
         -replace '(?m)^MCP_DOMAIN=.*$', "MCP_DOMAIN=$domainNames" `
         -replace '(?m)^MCP_TLS_CERT=.*$', "MCP_TLS_CERT=$certFile" `
-        -replace '(?m)^MCP_TLS_KEY=.*$', "MCP_TLS_KEY=$keyFile" `
-        -replace '(?m)^S3_SECRET_KEY=.*$', "S3_SECRET_KEY=$(New-Secret)"
+        -replace '(?m)^MCP_TLS_KEY=.*$', "MCP_TLS_KEY=$keyFile"
+    if ($BundledS3) {
+        $content = $content `
+            -replace '(?m)^#(COMPOSE_PATH_SEPARATOR|COMPOSE_FILE)=', '$1=' `
+            -replace '(?m)^S3_SECRET_KEY=.*$', "S3_SECRET_KEY=$(New-Secret)"
+    }
     [IO.File]::WriteAllText($envFile, $content, (New-Object Text.UTF8Encoding $false))
 
     Write-Host "Created $envFile"
     Write-Host "  shared folder : $share  ->  /share (outputs: $share\gemini-mcp-output)"
     Write-Host "  listen        : https://${bindAddress}:$portNumber  (TLS names: $domainNames)"
     if ($certFile) { Write-Host "  certificate   : $certFile (key: $keyFile)" }
-    Write-Host "  media store   : bundled S3 (SeaweedFS), bucket gemini-media"
+    if ($BundledS3) {
+        Write-Host "  media store   : bundled S3 (docker-compose.s3.yml), bucket gemini-media"
+    } else {
+        Write-Host "  media store   : none - set S3_* in .env for image/speech/video tools (or rerun setup -Force -BundledS3)"
+    }
     if (-not (Test-Loopback $bindAddress) -and -not $Domain) {
         Write-Host "  note          : add this host's name/IP to MCP_DOMAIN in .env (or pass -Domain) so remote clients get a matching certificate"
     }

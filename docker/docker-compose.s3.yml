@@ -1,0 +1,52 @@
+# 내장 S3 호환 저장소 (SeaweedFS, Apache-2.0). docker-compose.yml 위에 겹쳐서 씁니다:
+#   docker compose -f docker-compose.yml -f docker-compose.s3.yml up -d
+# 또는 .env 에 COMPOSE_FILE=docker-compose.yml:docker-compose.s3.yml (COMPOSE_PATH_SEPARATOR=:) 를 두면 -f 없이도 같습니다.
+#
+# 네트워크
+#   storage : gemini-mcp ↔ s3 (외부와 단절된 internal 네트워크, S3 접속 정보는 MCP 서버만 가짐)
+# 호스트에 포트를 게시하지 않습니다. 데이터는 s3-data 볼륨에 남습니다.
+
+services:
+  gemini-mcp:
+    # 외부 S3 설정(S3_ENDPOINT 등)과 상관없이 내장 저장소를 씁니다. 버킷이 없으면 MCP 서버가 시작할 때 만듭니다.
+    environment:
+      GEMINI_MCP_S3_BUCKET: ${S3_BUCKET:-gemini-media}
+      GEMINI_MCP_S3_ENDPOINT: http://s3:8333
+      GEMINI_MCP_S3_REGION: ""
+      GEMINI_MCP_S3_ACCESS_KEY: ${S3_ACCESS_KEY:-gemini-mcp}
+      GEMINI_MCP_S3_SECRET_KEY: ${S3_SECRET_KEY:?S3_SECRET_KEY 가 필요합니다 (docker.ps1 setup -BundledS3 / docker.sh setup --bundled-s3 가 .env 에 생성)}
+      GEMINI_MCP_S3_PATH_STYLE: "true"
+    depends_on:
+      s3:
+        condition: service_healthy
+    networks:
+      - storage
+
+  # `weed mini` 가 S3_ACCESS_KEY/S3_SECRET_KEY 로 계정을, S3_BUCKET 으로 버킷을 만듭니다.
+  s3:
+    image: chrislusf/seaweedfs:4.48
+    container_name: gemini-mcp-s3
+    restart: unless-stopped
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-gemini-mcp}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:?S3_SECRET_KEY 가 필요합니다 (docker.ps1 setup -BundledS3 / docker.sh setup --bundled-s3 가 .env 에 생성)}
+      S3_BUCKET: ${S3_BUCKET:-gemini-media}
+    volumes:
+      - s3-data:/data
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8333/healthz || nc -z 127.0.0.1 8333"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - storage
+
+networks:
+  storage:
+    internal: true
+
+volumes:
+  s3-data:

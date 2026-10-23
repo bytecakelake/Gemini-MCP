@@ -20,7 +20,7 @@ dashboard ─(Admin API)─▶ APISIX ─▶ etcd (라우트·API 키)
 | `loki` | [Grafana Loki](https://grafana.com/oss/loki/) 3.7 (AGPL-3.0) | 요청·관리·시스템 로그 저장. 대시보드 지표도 LogQL 로 여기서 계산 |
 | `dashboard` | Nuxt 4 + Vuetify 4(Material Design) + TypeScript, Nitro `deno-server` | 모니터링, 로그, API 키 관리, 설정. 서버 쪽에서 관리자 인증과 APISIX·Loki 연동 |
 | `caddy` | Caddy 2 | TLS 종단, zstd/gzip 압축, HTTP/3 |
-| `s3` | [SeaweedFS](https://github.com/seaweedfs/seaweedfs) 4.48 (Apache-2.0) | 생성 미디어용 내장 S3 저장소 (기본 `COMPOSE_PROFILES=s3`, 외부 S3 를 쓰면 끔) |
+| `s3` | [SeaweedFS](https://github.com/seaweedfs/seaweedfs) 4.48 (Apache-2.0) | 생성 미디어용 내장 S3 저장소 (선택 사항, 별도 파일 `docker-compose.s3.yml` 을 겹칠 때만 실행) |
 
 ## 제공 도구
 
@@ -123,7 +123,7 @@ docker compose 를 직접 쓰는 경우: `docker compose -f docker/docker-compos
 
 | 명령 | 동작 |
 |---|---|
-| `setup` | `.env` 생성 (`-ShareDir`/`--share-dir`, `-Bind`/`--bind`, `-Port`/`--port`, `-Domain`/`--domain`, `-TlsCert`·`-TlsKey`/`--tls-cert`·`--tls-key`, `-Force`/`--force`) |
+| `setup` | `.env` 생성 (`-ShareDir`/`--share-dir`, `-Bind`/`--bind`, `-Port`/`--port`, `-Domain`/`--domain`, `-TlsCert`·`-TlsKey`/`--tls-cert`·`--tls-key`, `-BundledS3`/`--bundled-s3`, `-Force`/`--force`) |
 | `up` | 빌드 + 시작, healthcheck 통과까지 대기 |
 | `down` / `restart` / `logs` / `status` | 중지·삭제 / 재시작 / 로그 / 상태와 연결 정보 |
 | `rebuild` | 캐시 없이 베이스 이미지부터 다시 빌드 |
@@ -189,13 +189,13 @@ docker compose 를 직접 쓰는 경우: `docker compose -f docker/docker-compos
 
   | 저장소 | 설정 |
   |---|---|
-  | 내장 S3 (기본, SeaweedFS 컨테이너) | `.env` 기본값 그대로(`COMPOSE_PROFILES=s3`, `S3_ENDPOINT=http://s3:8333`, `S3_BUCKET=gemini-media`). `S3_SECRET_KEY` 는 `docker.ps1`/`docker.sh` 가 무작위로 만듭니다. 버킷과 계정은 첫 실행 때 자동 생성되고 데이터는 `s3-data` 볼륨에 남습니다 |
-  | 외부 S3 (AWS S3, Cloudflare R2, Backblaze B2, MinIO 등) | `COMPOSE_PROFILES` 를 비우고(내장 S3 끄기) `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_ENDPOINT`(AWS 면 비우고 `S3_REGION`) 설정 |
+  | 외부 S3 (AWS S3, Cloudflare R2, Backblaze B2, MinIO 등) | `.env` 에 `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_ENDPOINT`(AWS 면 비우고 `S3_REGION`) 설정. `S3_BUCKET` 이 비어 있으면 이미지·음성·영상 도구만 오류를 반환합니다 |
+  | 내장 S3 (선택, SeaweedFS 컨테이너) | `docker compose -f docker-compose.yml -f docker-compose.s3.yml up -d` 처럼 `docker-compose.s3.yml` 을 겹칩니다. `setup -BundledS3` / `setup --bundled-s3` 는 `.env` 에 `COMPOSE_FILE=docker-compose.yml:docker-compose.s3.yml` 과 무작위 `S3_SECRET_KEY` 를 넣어 `-f` 없이도 겹치게 합니다. 버킷과 계정은 첫 실행 때 자동 생성되고 데이터는 `s3-data` 볼륨에 남습니다 |
 
   버킷이 없으면 MCP 서버가 시작할 때 만듭니다. 외부 S3 키에는 해당 버킷(접두사 `S3_PREFIX`, 기본 `gemini-mcp-media/`)의 읽기·쓰기·목록·삭제 권한이 필요합니다.
   S3 접속 정보는 MCP 서버만 갖고, 대시보드는 MCP 서버의 내부 API(`/internal/media`, `backend` 네트워크, APISIX 가 라우팅하지 않음)로 목록 조회·삭제를 요청합니다.
   APISIX 는 요청한 키의 컨슈머 이름을 `X-Mcp-Consumer` 헤더로 넘기며(클라이언트가 보낸 값은 덮어씀), 대시보드가 이를 키 이름으로 바꿔 보여 줍니다.
-  이전 버전의 `.env`(S3 설정 없음)는 `docker.ps1`/`docker.sh` 가 실행될 때 내장 S3 설정을 자동으로 추가합니다.
+  이전 버전의 `.env` 에 `COMPOSE_PROFILES=s3` 가 있으면 `docker.ps1`/`docker.sh` 가 실행될 때 `COMPOSE_FILE` 로 바꿔 내장 S3 를 계속 씁니다.
   예전 버전이 공유 폴더에 남긴 `<OUTPUT_SUBDIR>/.media` 는 더 이상 쓰지 않으니 지워도 됩니다.
 - **데이터 볼륨**: `etcd-data`(라우트·API 키), `loki-data`(로그), `dashboard-data`(관리자 비밀번호 해시), `caddy-data`(인증서), `s3-data`(내장 S3).
 - 설정 항목 전체는 [docker/.env.example](docker/.env.example) 을 참고하세요. 설정 우선순위는 셸 환경 변수 > `.env` 입니다 (docker compose 와 동일).

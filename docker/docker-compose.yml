@@ -11,8 +11,11 @@
 #   edge    : caddy ↔ apisix
 #   backend : apisix ↔ gemini-mcp, dashboard (도구 목록·상태 확인, 생성 미디어 관리 /internal/media)
 #   control : apisix(Admin API, 10.89.250.10) ↔ dashboard, etcd, loki — MCP 서버와 외부에서는 접근 불가
-#   storage : gemini-mcp ↔ s3 (내장 S3. 외부와 단절된 internal 네트워크, S3 접속 정보는 MCP 서버만 가짐)
 # 호스트에 포트를 게시하는 것은 caddy 뿐입니다.
+#
+# 생성 미디어 저장소는 .env 의 S3_* 로 지정한 외부 S3 입니다. 내장 S3(SeaweedFS)를 함께 띄우려면 docker-compose.s3.yml 을 겹칩니다:
+#   docker compose -f docker-compose.yml -f docker-compose.s3.yml up -d
+# (.env 의 COMPOSE_FILE 로 지정해 두면 -f 없이도 같습니다. docker.ps1 setup -BundledS3 / docker.sh setup --bundled-s3 가 설정)
 name: gemini-mcp
 
 x-hardening: &hardening
@@ -42,13 +45,13 @@ services:
       GEMINI_MCP_PATH_MAPS: ${HOST_SHARE_DIR:?HOST_SHARE_DIR 를 .env 에 설정하세요}=/share
       GEMINI_MCP_OUTPUT_DIR: /share/${OUTPUT_SUBDIR:-gemini-mcp-output}
       # 생성 미디어(이미지·음성·영상)는 모두 S3 호환 저장소에 메타데이터와 함께 보관됩니다 (자동 삭제 없음, 대시보드에서 관리).
-      # 기본은 내장 s3 서비스. 외부 S3(AWS, R2 등)를 쓰려면 .env 의 S3_* 를 바꾸고 COMPOSE_PROFILES 에서 s3 를 빼세요.
-      # S3_ENDPOINT 는 '-' 기본값이라 빈 값(AWS S3)을 그대로 넘깁니다.
-      GEMINI_MCP_S3_BUCKET: ${S3_BUCKET:-gemini-media}
-      GEMINI_MCP_S3_ENDPOINT: ${S3_ENDPOINT-http://s3:8333}
+      # S3_BUCKET 이 비어 있으면 저장소 없이 시작하고, 이미지·음성·영상 도구만 오류를 반환합니다.
+      # 내장 S3 를 쓰면 docker-compose.s3.yml 이 이 값들을 내장 저장소로 덮어씁니다.
+      GEMINI_MCP_S3_BUCKET: ${S3_BUCKET:-}
+      GEMINI_MCP_S3_ENDPOINT: ${S3_ENDPOINT:-}
       GEMINI_MCP_S3_REGION: ${S3_REGION:-}
-      GEMINI_MCP_S3_ACCESS_KEY: ${S3_ACCESS_KEY:-gemini-mcp}
-      GEMINI_MCP_S3_SECRET_KEY: ${S3_SECRET_KEY:?S3_SECRET_KEY 가 필요합니다 (docker.ps1 / docker.sh 가 .env 에 생성)}
+      GEMINI_MCP_S3_ACCESS_KEY: ${S3_ACCESS_KEY:-}
+      GEMINI_MCP_S3_SECRET_KEY: ${S3_SECRET_KEY:-}
       GEMINI_MCP_S3_PREFIX: ${S3_PREFIX:-}
       GEMINI_MCP_S3_PATH_STYLE: ${S3_PATH_STYLE:-}
       GEMINI_MCP_PUBLIC_URL: ${PUBLIC_URL:-}
@@ -56,39 +59,8 @@ services:
       - ${HOST_SHARE_DIR}:/share
     tmpfs:
       - /tmp
-    # 내장 S3 를 켰을 때만 그보다 늦게 시작합니다 (켜지 않았으면 무시).
-    depends_on:
-      s3:
-        condition: service_healthy
-        required: false
     networks:
       - backend
-      - storage
-
-  # 내장 S3 호환 저장소 (SeaweedFS, Apache-2.0). COMPOSE_PROFILES=s3(기본) 일 때 실행됩니다.
-  # `weed mini` 가 S3_ACCESS_KEY/S3_SECRET_KEY 로 계정을, S3_BUCKET 으로 버킷을 만듭니다. 데이터는 s3-data 볼륨에 남습니다.
-  # 호스트에 포트를 게시하지 않고, MCP 서버만 붙는 internal 네트워크(storage)에 둡니다.
-  s3:
-    image: chrislusf/seaweedfs:4.48
-    container_name: gemini-mcp-s3
-    profiles: ["s3"]
-    restart: unless-stopped
-    environment:
-      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-gemini-mcp}
-      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:?S3_SECRET_KEY 가 필요합니다 (docker.ps1 / docker.sh 가 .env 에 생성)}
-      S3_BUCKET: ${S3_BUCKET:-gemini-media}
-    volumes:
-      - s3-data:/data
-    security_opt:
-      - no-new-privileges:true
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8333/healthz || nc -z 127.0.0.1 8333"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 15s
-    networks:
-      - storage
 
   # API 게이트웨이 (Apache APISIX). 라우트와 API 키(컨슈머)는 etcd 에 저장되고 대시보드가 Admin API 로 관리합니다.
   # 시작할 때 conf/nginx.conf 를 생성하므로 루트 파일시스템은 읽기 전용으로 두지 않습니다.
@@ -245,8 +217,6 @@ services:
 networks:
   edge:
   backend:
-  storage:
-    internal: true
   control:
     ipam:
       config:
@@ -258,4 +228,3 @@ volumes:
   dashboard-data:
   caddy-data:
   caddy-config:
-  s3-data:

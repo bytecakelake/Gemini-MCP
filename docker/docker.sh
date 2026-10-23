@@ -2,9 +2,10 @@
 # Gemini MCP - Docker self-hosting helper (Linux / macOS / Git Bash)
 #
 #   docker/docker.sh setup [--share-dir DIR] [--bind 127.0.0.1] [--port 5100] [--domain "localhost, 127.0.0.1"]
-#                          [--tls-cert fullchain.pem --tls-key privkey.pem] [--force]
+#                          [--tls-cert fullchain.pem --tls-key privkey.pem] [--bundled-s3] [--force]
 #                          --tls-cert/--tls-key: use certificate files prepared by the server admin instead of MCP_TLS
-#                          Generated media goes to the bundled S3 container (SeaweedFS); see .env.example for external S3.
+#                          --bundled-s3: also run the bundled S3 container (docker-compose.s3.yml) for generated media.
+#                          Without it, set S3_* in .env for an external S3 (see .env.example).
 #   docker/docker.sh up          # build + start (runs setup first if .env is missing), waits until healthy
 #   docker/docker.sh down | restart | rebuild | logs | status
 #   docker/docker.sh cert        # export the Caddy local CA root certificate (MCP_TLS=internal) to docker/caddy-root.crt
@@ -20,7 +21,7 @@ CA_FILE="$ROOT/caddy-root.crt"
 
 COMMAND="${1:-up}"
 [ $# -gt 0 ] && shift
-SHARE_DIR="" BIND="" PORT="" DOMAIN="" TLS_CERT="" TLS_KEY="" FORCE=0
+SHARE_DIR="" BIND="" PORT="" DOMAIN="" TLS_CERT="" TLS_KEY="" BUNDLED_S3=0 FORCE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --share-dir) SHARE_DIR="$2"; shift 2 ;;
@@ -29,6 +30,7 @@ while [ $# -gt 0 ]; do
     --domain) DOMAIN="$2"; shift 2 ;;
     --tls-cert) TLS_CERT="$2"; shift 2 ;;
     --tls-key) TLS_KEY="$2"; shift 2 ;;
+    --bundled-s3) BUNDLED_S3=1; shift ;;
     --force) FORCE=1; shift ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -46,27 +48,20 @@ is_loopback() { case "$1" in 127.0.0.1|localhost|::1|"[::1]") return 0 ;; *) ret
 compose() { (cd "$ROOT" && docker compose "$@"); }
 new_secret() { od -An -N16 -tx1 /dev/urandom | tr -d ' \n'; }
 
-# .env files created before media moved to S3 have no S3_SECRET_KEY: switch them to the bundled S3
-# (generated secret, COMPOSE_PROFILES=s3). An empty secret always means the bundled store, since external S3 needs one.
+# The bundled S3 moved from the "s3" compose profile to docker-compose.s3.yml: .env files that enabled the profile
+# get COMPOSE_FILE instead, so the same store keeps running.
 update_media_store_settings() {
-  [ -f "$ENV_FILE" ] && [ -z "$(env_get S3_SECRET_KEY)" ] || return 0
-  local profiles secret
-  profiles="$(env_get COMPOSE_PROFILES)"
-  secret="$(new_secret)"
-  if ! grep -q '^S3_SECRET_KEY=' "$ENV_FILE"; then
-    printf '\n# Generated media store (added by docker.sh): bundled S3 (SeaweedFS). See .env.example for external S3.\nS3_SECRET_KEY=\n' >> "$ENV_FILE"
-  fi
-  sed -i.bak -e "s|^S3_SECRET_KEY=.*|S3_SECRET_KEY=$secret|" "$ENV_FILE"
-  case ",$profiles," in
-    *,s3,*) ;;
-    *) if grep -q '^COMPOSE_PROFILES=' "$ENV_FILE"; then
-         sed -i.bak -e "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=${profiles:+$profiles,}s3|" "$ENV_FILE"
-       else
-         echo "COMPOSE_PROFILES=s3" >> "$ENV_FILE"
-       fi ;;
-  esac
+  [ -f "$ENV_FILE" ] || return 0
+  local profiles rest
+  profiles="$(sed -n 's/^COMPOSE_PROFILES=//p' "$ENV_FILE" | tail -1 | tr -d '\r" ')"
+  case ",$profiles," in *,s3,*) ;; *) return 0 ;; esac
+  grep -q '^COMPOSE_FILE=' "$ENV_FILE" && return 0
+  rest="$(printf '%s' ",$profiles," | sed -e 's/,s3,/,/g' -e 's/^,//' -e 's/,$//')"
+  sed -i.bak -e "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=$rest\\
+COMPOSE_PATH_SEPARATOR=:\\
+COMPOSE_FILE=docker-compose.yml:docker-compose.s3.yml|" "$ENV_FILE"
   rm -f "$ENV_FILE.bak"
-  echo "Updated $ENV_FILE : generated media now goes to the bundled S3 container (S3_SECRET_KEY generated)."
+  echo "Updated $ENV_FILE : the bundled S3 now comes from docker-compose.s3.yml (COMPOSE_FILE)."
 }
 # Absolute path of an existing file (Windows form under Git Bash, like HOST_SHARE_DIR).
 abs_file() {
@@ -91,6 +86,12 @@ setup() {
     { [ -n "$TLS_CERT" ] && [ -n "$TLS_KEY" ]; } || { echo "--tls-cert and --tls-key must be given together." >&2; exit 2; }
     cert_file="$(abs_file "$TLS_CERT")"; key_file="$(abs_file "$TLS_KEY")"
   fi
+  local s3_args=()
+  if [ "$BUNDLED_S3" -eq 1 ]; then
+    s3_args=(-e "s|^#COMPOSE_PATH_SEPARATOR=|COMPOSE_PATH_SEPARATOR=|"
+             -e "s|^#COMPOSE_FILE=|COMPOSE_FILE=|"
+             -e "s|^S3_SECRET_KEY=.*|S3_SECRET_KEY=$(new_secret)|")
+  fi
   sed -e "s|^HOST_SHARE_DIR=.*|HOST_SHARE_DIR=$share|" \
       -e "s|^MCP_BIND=.*|MCP_BIND=$bind|" \
       -e "s|^MCP_PORT=.*|MCP_PORT=$port|" \
@@ -99,14 +100,18 @@ setup() {
       -e "s|^MCP_TLS_KEY=.*|MCP_TLS_KEY=$key_file|" \
       -e "s|^DOCKER_UID=.*|DOCKER_UID=$(id -u)|" \
       -e "s|^DOCKER_GID=.*|DOCKER_GID=$(id -g)|" \
-      -e "s|^S3_SECRET_KEY=.*|S3_SECRET_KEY=$(new_secret)|" \
+      ${s3_args[@]+"${s3_args[@]}"} \
       "$ROOT/.env.example" > "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   echo "Created $ENV_FILE"
   echo "  shared folder : $share  ->  /share (outputs: $share/gemini-mcp-output)"
   echo "  listen        : https://$bind:$port  (TLS names: $domain)"
   [ -n "$cert_file" ] && echo "  certificate   : $cert_file (key: $key_file)"
-  echo "  media store   : bundled S3 (SeaweedFS), bucket gemini-media"
+  if [ "$BUNDLED_S3" -eq 1 ]; then
+    echo "  media store   : bundled S3 (docker-compose.s3.yml), bucket gemini-media"
+  else
+    echo "  media store   : none - set S3_* in .env for image/speech/video tools (or rerun setup --force --bundled-s3)"
+  fi
   if ! is_loopback "$bind" && [ -z "$DOMAIN" ]; then
     echo "  note          : add this host's name/IP to MCP_DOMAIN in .env (or pass --domain) so remote clients get a matching certificate"
   fi
