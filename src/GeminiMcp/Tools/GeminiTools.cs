@@ -143,8 +143,8 @@ public sealed class GeminiTools(
     [McpServerTool(Name = "gemini_generate_image", Title = "Generate / edit image", Destructive = false, OpenWorld = true)]
     [Description("""
         Gemini 이미지 모델(Nano Banana)로 이미지를 생성하거나, input_images 를 주면 기존 이미지를 편집/합성합니다.
-        결과는 ResourceLink(gemini://media/...)로 반환되며 보관 기간(기본 48시간, Gemini Files API 와 같음)이 지나면 자동 삭제됩니다.
-        남기려면 그 전에 내려받아 저장하세요. return_image=true 면 이미지 자체도 응답에 포함합니다(토큰 사용 증가).
+        결과는 서버 S3 저장소에 보관되고 ResourceLink(gemini://media/...)로 반환됩니다(관리자가 삭제할 수 있음).
+        return_image=true 면 이미지 자체도 응답에 포함합니다(토큰 사용 증가).
         """)]
     public async Task<CallToolResult> GenerateImageAsync(
         [Description("생성/편집 지시문 (구체적일수록 좋음: 피사체, 스타일, 구도, 조명, 텍스트)")] string prompt,
@@ -155,6 +155,7 @@ public sealed class GeminiTools(
         [Description("이미지 모델 이름. 생략 시 선택된 image 모델")] string? model = null,
         CancellationToken cancellationToken = default)
     {
+        EnsureMediaStore();
         var parts = await BuildPartsAsync(prompt, input_images, cancellationToken);
         var request = NewRequest(parts, null);
         var config = GenerationConfig(request, null, null);
@@ -181,7 +182,7 @@ public sealed class GeminiTools(
         for (var i = 0; i < images.Count; i++)
         {
             var (mime, data) = images[i];
-            result.Content.Add(await PublishAsync(data, mime, summary, cancellationToken));
+            result.Content.Add(await PublishAsync(data, mime, "gemini_generate_image", response.Model, prompt, null, summary, cancellationToken));
             if (return_image)
                 result.Content.Add(ImageContentBlock.FromBytes(data, mime));
         }
@@ -197,7 +198,7 @@ public sealed class GeminiTools(
     [Description("""
         Gemini TTS 로 텍스트를 자연스러운 음성(WAV, 24kHz mono)으로 합성합니다. 한국어 등 다국어를 지원합니다.
         style 로 말투/감정(예: '밝고 경쾌하게', '차분한 뉴스 앵커처럼')을 지시할 수 있습니다.
-        결과는 ResourceLink(gemini://media/...)로 반환되며 보관 기간(기본 48시간)이 지나면 자동 삭제됩니다. 남기려면 그 전에 내려받아 저장하세요.
+        결과는 서버 S3 저장소에 보관되고 ResourceLink(gemini://media/...)로 반환됩니다(관리자가 삭제할 수 있음).
         """)]
     public async Task<CallToolResult> TextToSpeechAsync(
         [Description("읽을 텍스트")] string text,
@@ -206,6 +207,7 @@ public sealed class GeminiTools(
         [Description("TTS 모델 이름. 생략 시 선택된 tts 모델")] string? model = null,
         CancellationToken cancellationToken = default)
     {
+        EnsureMediaStore();
         var spoken = string.IsNullOrWhiteSpace(style) ? text : $"{style.Trim()}:\n{text}";
         var request = NewRequest(new JsonArray(TextPart(spoken)), null);
         var config = GenerationConfig(request, null, null);
@@ -228,7 +230,8 @@ public sealed class GeminiTools(
         var bytes = isPcm ? OutputFiles.PcmToWav(audio.Data, audio.MimeType) : audio.Data;
         var seconds = isPcm ? audio.Data.Length / 2.0 / 24000 : (double?)null;
         var summary = new StringBuilder($"음성을 합성했습니다{(seconds is null ? "" : $" (약 {seconds:F1}초)")}:\n");
-        var link = await PublishAsync(bytes, isPcm ? "audio/wav" : audio.MimeType, summary, cancellationToken);
+        var link = await PublishAsync(
+            bytes, isPcm ? "audio/wav" : audio.MimeType, "gemini_text_to_speech", response.Model, spoken, null, summary, cancellationToken);
         summary.Append($"\n[gemini model={response.Model}]");
         return new CallToolResult { Content = [new TextContentBlock { Text = summary.ToString() }, link] };
     }
@@ -237,7 +240,7 @@ public sealed class GeminiTools(
     [Description("""
         Gemini 영상 모델(기본 gemini-omni-1.1-flash)로 텍스트·이미지에서 영상(MP4, 오디오 포함)을 생성하거나,
         input_video 또는 previous_interaction_id 로 기존 영상을 편집/연장합니다. 생성에는 수 분이 걸릴 수 있습니다.
-        결과는 ResourceLink(gemini://media/...)와 interaction_id 로 반환되며 보관 기간(기본 48시간)이 지나면 자동 삭제됩니다. 남기려면 그 전에 내려받아 저장하세요.
+        결과는 서버 S3 저장소에 보관되고 ResourceLink(gemini://media/...)와 interaction_id 로 반환됩니다(관리자가 삭제할 수 있음).
         이어서 수정하려면 그 id 를 previous_interaction_id 로 넘기세요.
         """)]
     public async Task<CallToolResult> GenerateVideoAsync(
@@ -251,6 +254,7 @@ public sealed class GeminiTools(
         [Description("영상 모델 이름. 생략 시 선택된 video 모델")] string? model = null,
         CancellationToken cancellationToken = default)
     {
+        EnsureMediaStore();
         var content = new JsonArray();
         foreach (var image in input_images ?? [])
         {
@@ -312,12 +316,13 @@ public sealed class GeminiTools(
                 video["uri"]?.GetValue<string>() ?? throw new McpException("영상 응답에 data 와 uri 가 모두 없습니다."), cancellationToken);
 
         var sb = new StringBuilder("영상을 생성했습니다:\n");
-        var link = await PublishAsync(bytes, mime, sb, cancellationToken);
+        var usedModel = interaction["model"]?.GetValue<string>() ?? resolved;
+        var link = await PublishAsync(bytes, mime, "gemini_generate_video", usedModel, prompt, id, sb, cancellationToken);
         if (id is not null)
             sb.Append($"interaction_id: {id} (previous_interaction_id 로 넘기면 이 영상을 이어서 편집/연장합니다)\n");
         if (comment.Length > 0)
             sb.Append($"\n모델 코멘트: {comment}\n");
-        sb.Append($"\n[gemini model={interaction["model"]?.GetValue<string>() ?? resolved}]");
+        sb.Append($"\n[gemini model={usedModel}]");
         return new CallToolResult { Content = [new TextContentBlock { Text = sb.ToString() }, link] };
     }
 
@@ -497,25 +502,29 @@ public sealed class GeminiTools(
     [Description("이 서버의 내장 스킬(사용 설명서)을 반환합니다. 어떤 상황에 어떤 Gemini 도구를 써야 하는지 모를 때 먼저 호출하세요.")]
     public static string UsageGuide() => SkillContent.Markdown;
 
-    /// <summary>생성 미디어를 임시 보관소에 쓰고 ResourceLink 를 돌려줍니다.</summary>
-    private async Task<ResourceLinkBlock> PublishAsync(byte[] data, string mimeType, StringBuilder summary, CancellationToken ct)
+    /// <summary>APISIX 가 넣어 주는 요청 API 키의 컨슈머 이름 (대시보드가 키 이름으로 바꿔 보여 줍니다).</summary>
+    public const string ConsumerHeader = "X-Mcp-Consumer";
+
+    /// <summary>생성 비용을 쓰기 전에 저장소가 있는지 확인합니다.</summary>
+    private void EnsureMediaStore()
     {
-        var item = await store.SaveAsync(data, mimeType, ct);
-        summary.Append($"- {item.Uri} ({mimeType}, {data.Length:N0} bytes, {item.ExpiresAt.ToLocalTime():yyyy-MM-dd HH:mm} 까지 보관)\n");
+        if (!store.IsEnabled)
+            throw new McpException("미디어 저장소(S3)가 설정되지 않아 생성 결과를 보관할 수 없습니다. 서버에 GEMINI_MCP_S3_BUCKET 등 S3 설정이 필요합니다.");
+    }
+
+    /// <summary>생성 미디어를 메타데이터와 함께 S3 에 저장하고 ResourceLink 를 돌려줍니다.</summary>
+    private async Task<ResourceLinkBlock> PublishAsync(
+        byte[] data, string mimeType, string tool, string? model, string? prompt, string? interactionId, StringBuilder summary, CancellationToken ct)
+    {
+        var consumer = http.HttpContext?.Request.Headers[ConsumerHeader].FirstOrDefault();
+        var item = await store.SaveAsync(data, mimeType, new MediaMetadata(tool, model, prompt, consumer, interactionId), ct);
+        summary.Append($"- {item.Uri} ({mimeType}, {data.Length:N0} bytes)\n");
         if (DownloadUrl(item) is { } url)
             summary.Append($"  다운로드: {url} (MCP 와 같은 API 키로 인증)\n");
-
-        // 로컬 디스크 저장소이고 클라이언트가 직접 열 수 있을 때(로컬 실행 또는 공유 폴더)만 경로를 알려 줍니다.
-        if (item.LocalPath is { } local && options.Paths.ToHost(local) is var host && (!options.Paths.IsEnabled || host != local))
-            summary.Append($"  임시 파일: {host}\n");
-
-        var ttl = store.Ttl.TotalHours >= 1 ? $"{store.Ttl.TotalHours:0.#}시간" : $"{store.Ttl.TotalMinutes:0}분";
         summary.Append(
-            $"  ⚠ 주의: 이 미디어는 임시 보관본이라 {ttl} 뒤({item.ExpiresAt.ToLocalTime():yyyy-MM-dd HH:mm}) 자동 삭제되며 복구할 수 없습니다.\n"
-            + "    사용자에게 전달하거나 나중에 다시 쓸 예정이면 그 전에 resources/read 또는 다운로드 URL 로 받아 클라이언트 쪽에 저장하세요.\n"
-            + "    삭제 후에는 이 URI 를 다른 도구에 넘겨도 실패합니다.\n");
-        return item.ToResourceLink(
-            $"Gemini 생성 미디어. {item.ExpiresAt.ToLocalTime():yyyy-MM-dd HH:mm} 에 자동 삭제됩니다. 남기려면 그 전에 내려받아 저장하세요.");
+            "  참고: 서버 저장소에 보관되며 관리자가 대시보드에서 삭제할 수 있습니다. 사용자에게 전달하거나 오래 쓸 결과물이면\n"
+            + "    resources/read 또는 다운로드 URL 로 받아 클라이언트 쪽에 저장하세요. 삭제된 뒤에는 이 URI 를 다른 도구에 넘겨도 실패합니다.\n");
+        return item.ToResourceLink("Gemini 생성 미디어 (서버 S3 저장소, 관리자가 삭제할 수 있음)");
     }
 
     private string? DownloadUrl(MediaItem item)

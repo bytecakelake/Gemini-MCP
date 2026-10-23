@@ -2,6 +2,7 @@
 import {
   mdiChartLine,
   mdiCogOutline,
+  mdiImageMultipleOutline,
   mdiKeyVariant,
   mdiLogout,
   mdiMenu,
@@ -20,6 +21,7 @@ const items = [
   { title: "모니터링", icon: mdiChartLine, to: "/" },
   { title: "로그", icon: mdiTextBoxSearchOutline, to: "/logs" },
   { title: "API 키", icon: mdiKeyVariant, to: "/keys" },
+  { title: "생성 미디어", icon: mdiImageMultipleOutline, to: "/media" },
   { title: "설정", icon: mdiCogOutline, to: "/settings" },
 ];
 

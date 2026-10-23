@@ -18,10 +18,8 @@ if (args.Contains("--help") || args.Contains("-h"))
         환경 변수:
           GEMINI_API_KEY          Gemini API 키 (필수, GOOGLE_API_KEY 도 인식)
           GEMINI_MCP_OUTPUT_DIR   모델 선택 저장 폴더   (기본: ~/gemini-mcp-output)
-          GEMINI_MCP_MEDIA_TTL_HOURS  생성 미디어 보관 시간 (기본 48, Gemini Files API 와 같음). 지나면 자동 삭제
-          GEMINI_MCP_MEDIA_DIR    로컬 디스크 보관 폴더 (기본: <임시 폴더>/gemini-mcp-media)
-          GEMINI_MCP_S3_BUCKET    지정하면 S3 호환 저장소에 보관 (GEMINI_MCP_S3_ENDPOINT, _REGION,
-                                  _ACCESS_KEY, _SECRET_KEY, _PREFIX, _PATH_STYLE)
+          GEMINI_MCP_S3_BUCKET    생성 미디어를 보관할 S3 호환 저장소 (이미지·음성·영상 도구에 필수)
+                                  GEMINI_MCP_S3_ENDPOINT, _REGION, _ACCESS_KEY, _SECRET_KEY, _PREFIX, _PATH_STYLE
           GEMINI_MCP_PUBLIC_URL   미디어 다운로드 URL 기준 주소 (기본: 요청 Host)
           MCP_ALLOWED_ORIGINS     허용할 브라우저 Origin (쉼표 구분, 기본은 localhost 만)
           GEMINI_MCP_PATH_MAPS    호스트=컨테이너 경로 매핑 (';' 구분, Docker 실행 시)
@@ -34,7 +32,8 @@ if (args.Contains("--help") || args.Contains("-h"))
 
         엔드포인트:
           POST /mcp     MCP Streamable HTTP
-          GET  /mcp/media/{name}  생성 미디어 다운로드 (보관 기간 내)
+          GET  /mcp/media/{name}  생성 미디어 다운로드
+          GET|DELETE /internal/media  미디어 목록·통계·삭제 (대시보드 전용, 게이트웨이로 노출하지 않음)
           GET  /skill   내장 스킬(SKILL.md)
           GET  /health  상태 확인
         """);
@@ -75,12 +74,8 @@ builder.Services.AddSingleton(_ => new HttpClient { Timeout = options.RequestTim
 builder.Services.AddSingleton<GeminiClient>();
 builder.Services.AddSingleton<MediaResolver>();
 builder.Services.AddSingleton<ModelCatalog>();
-if (options.S3 is { } s3)
-    builder.Services.AddSingleton<IMediaBackend>(sp => new S3MediaBackend(s3, sp.GetRequiredService<HttpClient>()));
-else
-    builder.Services.AddSingleton<IMediaBackend, LocalMediaBackend>();
 builder.Services.AddSingleton<MediaStore>();
-builder.Services.AddHostedService<MediaCleanupService>();
+builder.Services.AddHostedService<MediaStoreInitializer>();
 builder.Services.AddHttpContextAccessor();
 
 // MCP 기본 직렬화 옵션 + 도구 인수 타입(string[] 등)용 소스 생성 컨텍스트 (AOT)
@@ -108,6 +103,13 @@ var allowedOrigins = (builder.Configuration["MCP_ALLOWED_ORIGINS"] ?? "")
 // 보안: DNS 리바인딩 방지를 위한 Origin 검사 (MCP 사양 권고사항). API 키 인증은 앞단 API 게이트웨이(Apache APISIX)가 담당합니다.
 app.Use(async (context, next) =>
 {
+    // 내부 관리 API 는 브라우저에서 부를 일이 없으므로 Origin 이 있으면 모두 거부합니다.
+    if (context.Request.Path.StartsWithSegments("/internal") && context.Request.Headers.Origin.Count > 0)
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        await context.Response.WriteAsync("Origin not allowed");
+        return;
+    }
     if (context.Request.Path.StartsWithSegments("/mcp"))
     {
         var origin = context.Request.Headers.Origin.ToString();
@@ -126,11 +128,34 @@ app.MapMcp("/mcp");
 // 생성 미디어 다운로드. /mcp/* 아래라서 게이트웨이(APISIX)에서 MCP 와 같은 API 키로 인증됩니다.
 app.MapGet(MediaStore.HttpPrefix + "{name}", async (string name, MediaStore store, HttpContext context, CancellationToken ct) =>
 {
+    if (!store.IsEnabled)
+        return MediaStoreDisabled();
     var media = await store.OpenAsync(name, ct);
     if (media is null)
-        return Results.Text("Media not found or expired", statusCode: StatusCodes.Status404NotFound);
+        return Results.Text("Media not found", statusCode: StatusCodes.Status404NotFound);
     context.Response.RegisterForDisposeAsync(media);
     return Results.Stream(media.Content, media.MimeType, lastModified: media.LastModifiedUtc, enableRangeProcessing: media.Content.CanSeek);
+});
+
+// 미디어 관리용 내부 API (대시보드 → MCP 서버, backend 네트워크). APISIX 는 /mcp, /skill, /health 만 이 서버로 보내므로
+// 외부에서는 닿지 않습니다. MCP 엔드포인트와 마찬가지로 인증하지 않으니 이 서버를 루프백/내부 네트워크에만 노출하세요.
+var internalMedia = app.MapGroup("/internal/media");
+internalMedia.MapGet("", async (MediaStore store, string? cursor, int? limit, CancellationToken ct) =>
+    store.IsEnabled
+        ? Results.Json(await store.ListAsync(cursor, limit ?? 50, ct), MediaJsonContext.Default.MediaPage)
+        : MediaStoreDisabled());
+internalMedia.MapGet("/stats", async (MediaStore store, CancellationToken ct) =>
+    store.IsEnabled
+        ? Results.Json(await store.StatsAsync(ct), MediaJsonContext.Default.MediaStats)
+        : MediaStoreDisabled());
+internalMedia.MapDelete("/{name}", async (string name, MediaStore store, ILogger<MediaStore> logger, CancellationToken ct) =>
+{
+    if (!store.IsEnabled)
+        return MediaStoreDisabled();
+    if (!await store.DeleteAsync(name, ct))
+        return Results.Text("Media not found", statusCode: StatusCodes.Status404NotFound);
+    logger.LogInformation("Media deleted: {Name}", name);
+    return Results.NoContent();
 });
 app.MapGet("/", () => Results.Text(
     "Gemini MCP server is running.\nMCP endpoint: POST /mcp (Streamable HTTP)\nSkill: GET /skill\n", "text/plain; charset=utf-8"));
@@ -145,6 +170,9 @@ if (options.Paths.IsEnabled)
 
 app.Run();
 return 0;
+
+static IResult MediaStoreDisabled() =>
+    Results.Text("Media store (S3) is not configured", statusCode: StatusCodes.Status503ServiceUnavailable);
 
 [JsonSerializable(typeof(string[]))]
 [JsonSerializable(typeof(double?))]

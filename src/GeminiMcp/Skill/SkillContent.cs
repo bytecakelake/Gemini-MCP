@@ -18,8 +18,8 @@ public static class SkillContent
         - 이미지 생성·편집: gemini_generate_image / 영상 생성·편집: gemini_generate_video / 음성 합성: gemini_text_to_speech
         - Python 샌드박스 실행: gemini_run_code / 세컨드 오피니언·대용량 분석: gemini_ask
         - 모델 확인·변경: gemini_list_models 로 용도별 목록을 보고 gemini_select_model 로 선택 (환경 변수 아님)
-        생성 미디어는 gemini://media/... ResourceLink 로 반환되며 보관 기간(기본 48시간)이 지나면 자동 삭제되어 복구할 수 없습니다.
-        결과물을 남겨야 하면 그 전에 내려받아 클라이언트 쪽에 저장하세요.
+        생성 미디어는 서버 S3 저장소에 보관되고 gemini://media/... ResourceLink 로 반환됩니다(관리자가 삭제할 수 있음).
+        사용자에게 전달하거나 오래 쓸 결과물은 내려받아 클라이언트 쪽에 저장하세요.
         파일 경로는 서버 PC 기준 절대 경로. 자세한 사용법은 gemini_usage_guide 도구,
         'gemini_skill' 프롬프트 또는 gemini://skill/SKILL.md 리소스를 참고하세요.
         """;

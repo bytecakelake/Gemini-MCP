@@ -44,9 +44,17 @@ public abstract class GeminiServer : IAsyncLifetime
     public Uri McpEndpoint => new(BaseUri, "/mcp");
     /// <summary>서버가 생성 파일을 저장하는 폴더 (테스트 PC 기준 경로).</summary>
     public string OutputDirectory { get; }
-    /// <summary>생성 미디어 임시 보관 폴더 (로컬 프로세스에서만 알 수 있음).</summary>
-    public string? MediaDirectory => IsExternal ? null : Path.Combine(OutputDirectory, ".media");
     public string? ApiKey { get; } = ResolveApiKey();
+
+    /// <summary>
+    /// 생성 미디어용 S3. GEMINI_MCP_TEST_S3_ENDPOINT / _ACCESS_KEY / _SECRET_KEY 가 있으면 로컬 서버마다 새 버킷을 씁니다
+    /// (예: docker run -p 127.0.0.1:18333:8333 -e AWS_ACCESS_KEY_ID=.. -e AWS_SECRET_ACCESS_KEY=.. chrislusf/seaweedfs:4.48).
+    /// 외부 서버 모드에서는 배포의 S3 설정을 그대로 씁니다.
+    /// </summary>
+    public static readonly string? S3Endpoint = NullIfEmpty(Environment.GetEnvironmentVariable("GEMINI_MCP_TEST_S3_ENDPOINT"));
+    public string Bucket { get; } = $"gmcp-test-{Guid.NewGuid():N}"[..30];
+    public virtual bool HasMediaStore => IsExternal || S3Endpoint is not null;
+    public const string NoMediaStoreReason = "Set GEMINI_MCP_TEST_S3_ENDPOINT (and _ACCESS_KEY/_SECRET_KEY) to test media tools.";
     public HttpClient Http { get; } = new() { Timeout = TimeSpan.FromMinutes(10) };
     public string Log { get { lock (_log) return _log.ToString(); } }
 
@@ -78,7 +86,16 @@ public abstract class GeminiServer : IAsyncLifetime
             CreateNoWindow = true,
         };
         psi.Environment["GEMINI_MCP_OUTPUT_DIR"] = OutputDirectory;
-        psi.Environment["GEMINI_MCP_MEDIA_DIR"] = MediaDirectory!;
+        // 개발자 셸의 S3 설정이 섞이지 않게 비우고, 테스트 S3 가 있으면 새 버킷으로 지정합니다.
+        foreach (var key in psi.Environment.Keys.Where(k => k.StartsWith("GEMINI_MCP_S3_", StringComparison.OrdinalIgnoreCase)).ToList())
+            psi.Environment.Remove(key);
+        if (HasMediaStore && S3Endpoint is not null)
+        {
+            psi.Environment["GEMINI_MCP_S3_ENDPOINT"] = S3Endpoint;
+            psi.Environment["GEMINI_MCP_S3_BUCKET"] = Bucket;
+            psi.Environment["GEMINI_MCP_S3_ACCESS_KEY"] = Environment.GetEnvironmentVariable("GEMINI_MCP_TEST_S3_ACCESS_KEY") ?? "";
+            psi.Environment["GEMINI_MCP_S3_SECRET_KEY"] = Environment.GetEnvironmentVariable("GEMINI_MCP_TEST_S3_SECRET_KEY") ?? "";
+        }
         if (ApiKey is not null)
             psi.Environment["GEMINI_API_KEY"] = ApiKey;
         foreach (var (key, value) in ExtraEnvironment)
@@ -132,13 +149,18 @@ public abstract class GeminiServer : IAsyncLifetime
     }
 
     /// <summary>인증 헤더를 포함한 MCP 클라이언트를 만듭니다 (Streamable HTTP). protocolVersion 생략 시 SDK 최신 버전.</summary>
-    public Task<McpClient> ConnectAsync(CancellationToken ct, string? protocolVersion = null) =>
-        McpClient.CreateAsync(
+    /// <param name="extraHeaders">모든 요청에 붙일 헤더 (예: 게이트웨이가 넣는 X-Mcp-Consumer 흉내).</param>
+    public Task<McpClient> ConnectAsync(CancellationToken ct, string? protocolVersion = null, Dictionary<string, string>? extraHeaders = null)
+    {
+        var headers = new Dictionary<string, string>(extraHeaders ?? []);
+        if (GatewayKey is not null)
+            headers["Authorization"] = $"Bearer {GatewayKey}";
+        return McpClient.CreateAsync(
             new HttpClientTransport(new HttpClientTransportOptions
             {
                 Endpoint = McpEndpoint,
                 TransportMode = HttpTransportMode.StreamableHttp,
-                AdditionalHeaders = GatewayKey is null ? null : new Dictionary<string, string> { ["Authorization"] = $"Bearer {GatewayKey}" },
+                AdditionalHeaders = headers.Count == 0 ? null : headers,
             }),
             new McpClientOptions
             {
@@ -146,6 +168,7 @@ public abstract class GeminiServer : IAsyncLifetime
                 ProtocolVersion = protocolVersion,
             },
             cancellationToken: ct);
+    }
 
     private static string ResolveExecutable()
     {
@@ -195,38 +218,11 @@ public sealed class UploadServer : GeminiServer
         new Dictionary<string, string> { ["GEMINI_INLINE_LIMIT_BYTES"] = "1024" };
 }
 
-/// <summary>미디어 보관 기간을 약 3.6초(0.001시간)로 줄인 서버 (보관 기간 설정 검증용).</summary>
-public sealed class ShortTtlServer : GeminiServer
+/// <summary>S3 를 설정하지 않은 서버 (미디어 도구가 생성 전에 오류를 내는지 검증).</summary>
+public sealed class NoMediaStoreServer : GeminiServer
 {
     protected override bool AllowExternal => false;
-
-    protected override IReadOnlyDictionary<string, string> ExtraEnvironment =>
-        new Dictionary<string, string> { ["GEMINI_MCP_MEDIA_TTL_HOURS"] = "0.001" };
-}
-
-/// <summary>
-/// S3 호환 저장소를 쓰는 서버. GEMINI_MCP_TEST_S3_ENDPOINT / _ACCESS_KEY / _SECRET_KEY 가 있을 때만 씁니다
-/// (예: docker run -p 127.0.0.1:18333:8333 -e AWS_ACCESS_KEY_ID=.. -e AWS_SECRET_ACCESS_KEY=.. chrislusf/seaweedfs:4.48).
-/// 실행마다 새 버킷을 써서 서버가 버킷을 만드는 경로도 검증합니다. 보관 기간은 약 7초입니다.
-/// </summary>
-public sealed class S3Server : GeminiServer
-{
-    public static readonly string? Endpoint = Environment.GetEnvironmentVariable("GEMINI_MCP_TEST_S3_ENDPOINT");
-    public string Bucket { get; } = $"gmcp-test-{Guid.NewGuid():N}"[..30];
-    public bool IsConfigured => !string.IsNullOrEmpty(Endpoint);
-
-    protected override bool AllowExternal => false;
-
-    protected override IReadOnlyDictionary<string, string> ExtraEnvironment => IsConfigured
-        ? new Dictionary<string, string>
-        {
-            ["GEMINI_MCP_S3_ENDPOINT"] = Endpoint!,
-            ["GEMINI_MCP_S3_BUCKET"] = Bucket,
-            ["GEMINI_MCP_S3_ACCESS_KEY"] = Environment.GetEnvironmentVariable("GEMINI_MCP_TEST_S3_ACCESS_KEY") ?? "",
-            ["GEMINI_MCP_S3_SECRET_KEY"] = Environment.GetEnvironmentVariable("GEMINI_MCP_TEST_S3_SECRET_KEY") ?? "",
-            ["GEMINI_MCP_MEDIA_TTL_HOURS"] = "0.002",
-        }
-        : new Dictionary<string, string>();
+    public override bool HasMediaStore => false;
 }
 
 [CollectionDefinition(Name)]

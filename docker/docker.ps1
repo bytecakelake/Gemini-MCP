@@ -1,9 +1,9 @@
 # Gemini MCP - Docker self-hosting helper (Windows PowerShell 5.1+ / PowerShell 7)
 #
 #   .\docker\docker.ps1 setup [-ShareDir C:\Users\me] [-Bind 127.0.0.1] [-Port 5100] [-Domain "localhost, 127.0.0.1"]
-#                                   [-TlsCert fullchain.pem -TlsKey privkey.pem] [-S3] [-Force]
+#                                   [-TlsCert fullchain.pem -TlsKey privkey.pem] [-Force]
 #                                   -TlsCert/-TlsKey: use certificate files prepared by the server admin instead of MCP_TLS
-#                                   -S3: store generated media in the bundled S3 container (SeaweedFS) instead of the shared folder
+#                                   Generated media goes to the bundled S3 container (SeaweedFS); see .env.example for external S3.
 #   .\docker\docker.ps1 up          # build + start (runs setup first if .env is missing), waits until healthy
 #   .\docker\docker.ps1 down        # stop and remove the containers
 #   .\docker\docker.ps1 restart
@@ -20,7 +20,6 @@ param(
     [string]$Domain,
     [string]$TlsCert,
     [string]$TlsKey,
-    [switch]$S3,
     [switch]$Force
 )
 
@@ -46,6 +45,34 @@ function Read-DotEnv {
 
 function Test-Loopback([string]$address) { (-not $address) -or $address -in @("127.0.0.1", "localhost", "::1", "[::1]") }
 
+function New-Secret {
+    $bytes = New-Object byte[] 16
+    [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    -join ($bytes | ForEach-Object { $_.ToString("x2") })
+}
+
+# .env files created before media moved to S3 have no S3_SECRET_KEY: switch them to the bundled S3
+# (generated secret, COMPOSE_PROFILES=s3). An empty secret always means the bundled store, since external S3 needs one.
+function Update-MediaStoreSettings {
+    if (-not (Test-Path $envFile) -or $env:S3_SECRET_KEY) { return }
+    $cfg = Read-DotEnv
+    if ($cfg["S3_SECRET_KEY"]) { return }
+    $lines = [Collections.Generic.List[string]]::new([IO.File]::ReadAllLines($envFile))
+    function Set-Line([string]$name, [string]$value) {
+        $index = $lines.FindIndex({ param($l) $l -match "^\s*$name\s*=" })
+        if ($index -ge 0) { $lines[$index] = "$name=$value" } else { $lines.Add("$name=$value") }
+    }
+    if ($lines.FindIndex({ param($l) $l -match '^\s*S3_SECRET_KEY\s*=' }) -lt 0) {
+        $lines.Add("")
+        $lines.Add("# Generated media store (added by docker.ps1): bundled S3 (SeaweedFS). See .env.example for external S3.")
+    }
+    $profiles = @(($cfg["COMPOSE_PROFILES"] -split ",") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($profiles -notcontains "s3") { Set-Line "COMPOSE_PROFILES" ((@($profiles) + "s3") -join ",") }
+    Set-Line "S3_SECRET_KEY" (New-Secret)
+    [IO.File]::WriteAllLines($envFile, $lines, (New-Object Text.UTF8Encoding $false))
+    Write-Host "Updated $envFile : generated media now goes to the bundled S3 container (S3_SECRET_KEY generated)."
+}
+
 function Invoke-Setup {
     if ((Test-Path $envFile) -and -not $Force) {
         Write-Host ".env already exists (use -Force to regenerate): $envFile"
@@ -66,27 +93,15 @@ function Invoke-Setup {
         -replace '(?m)^MCP_PORT=.*$', "MCP_PORT=$portNumber" `
         -replace '(?m)^MCP_DOMAIN=.*$', "MCP_DOMAIN=$domainNames" `
         -replace '(?m)^MCP_TLS_CERT=.*$', "MCP_TLS_CERT=$certFile" `
-        -replace '(?m)^MCP_TLS_KEY=.*$', "MCP_TLS_KEY=$keyFile"
-    if ($S3) {
-        # Bundled SeaweedFS: account and bucket are created on first start from these values.
-        $bytes = New-Object byte[] 16
-        [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
-        $secret = -join ($bytes | ForEach-Object { $_.ToString("x2") })
-        $content = $content `
-            -replace '(?m)^COMPOSE_PROFILES=.*$', "COMPOSE_PROFILES=s3" `
-            -replace '(?m)^S3_ENDPOINT=.*$', "S3_ENDPOINT=http://s3:8333" `
-            -replace '(?m)^S3_BUCKET=.*$', "S3_BUCKET=gemini-media" `
-            -replace '(?m)^S3_ACCESS_KEY=.*$', "S3_ACCESS_KEY=gemini-mcp" `
-            -replace '(?m)^S3_SECRET_KEY=.*$', "S3_SECRET_KEY=$secret"
-    }
+        -replace '(?m)^MCP_TLS_KEY=.*$', "MCP_TLS_KEY=$keyFile" `
+        -replace '(?m)^S3_SECRET_KEY=.*$', "S3_SECRET_KEY=$(New-Secret)"
     [IO.File]::WriteAllText($envFile, $content, (New-Object Text.UTF8Encoding $false))
 
     Write-Host "Created $envFile"
     Write-Host "  shared folder : $share  ->  /share (outputs: $share\gemini-mcp-output)"
     Write-Host "  listen        : https://${bindAddress}:$portNumber  (TLS names: $domainNames)"
     if ($certFile) { Write-Host "  certificate   : $certFile (key: $keyFile)" }
-    $mediaStore = if ($S3) { "bundled S3 (SeaweedFS), bucket gemini-media" } else { "$share\gemini-mcp-output\.media" }
-    Write-Host "  media store   : $mediaStore"
+    Write-Host "  media store   : bundled S3 (SeaweedFS), bucket gemini-media"
     if (-not (Test-Loopback $bindAddress) -and -not $Domain) {
         Write-Host "  note          : add this host's name/IP to MCP_DOMAIN in .env (or pass -Domain) so remote clients get a matching certificate"
     }
@@ -208,6 +223,7 @@ function Invoke-Compose([string[]]$composeArgs) {
 function Invoke-Up([string[]]$buildArgs) {
     Assert-Docker
     if (-not (Test-Path $envFile)) { Invoke-Setup }
+    Update-MediaStoreSettings
     Set-ApiKey (Read-DotEnv)
     Assert-TlsFiles
     if ($buildArgs) { Invoke-Compose (@("build") + $buildArgs) }
@@ -228,10 +244,10 @@ switch ($Command) {
     "setup"       { Invoke-Setup }
     "up"          { Invoke-Up @() }
     "rebuild"     { Invoke-Up @("--no-cache", "--pull") }
-    "down"        { Assert-Docker; Set-ApiKey (Read-DotEnv) -Optional; Invoke-Compose @("down") }
-    "restart"     { Assert-Docker; Set-ApiKey (Read-DotEnv); Assert-TlsFiles; Invoke-Compose @("restart"); Wait-Healthy; Wait-Proxy; Show-Connection }
+    "down"        { Assert-Docker; Update-MediaStoreSettings; Set-ApiKey (Read-DotEnv) -Optional; Invoke-Compose @("down") }
+    "restart"     { Assert-Docker; Update-MediaStoreSettings; Set-ApiKey (Read-DotEnv); Assert-TlsFiles; Invoke-Compose @("restart"); Wait-Healthy; Wait-Proxy; Show-Connection }
     "cert"        { Assert-Docker; Export-Cert }
-    "logs"        { Assert-Docker; Set-ApiKey (Read-DotEnv) -Optional; Invoke-Compose @("logs", "-f", "--tail", "200") }
+    "logs"        { Assert-Docker; Update-MediaStoreSettings; Set-ApiKey (Read-DotEnv) -Optional; Invoke-Compose @("logs", "-f", "--tail", "200") }
     "reset-admin" { Invoke-ResetAdmin }
     "status"      {
         Assert-Docker

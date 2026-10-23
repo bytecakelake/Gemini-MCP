@@ -128,6 +128,7 @@ public sealed class GeminiToolTests(DefaultServer server) : IAsyncLifetime
     public async Task GenerateVideo_ReturnsMp4Link()
     {
         Assert.SkipUnless(Environment.GetEnvironmentVariable("GEMINI_MCP_TEST_VIDEO") == "1", "Set GEMINI_MCP_TEST_VIDEO=1 to run.");
+        Assert.SkipUnless(server.HasMediaStore, GeminiServer.NoMediaStoreReason);
         var result = await _client.CallOkAsync("gemini_generate_video", new()
         {
             ["prompt"] = "A red ball slowly rolling across a wooden table, static camera",
@@ -191,6 +192,7 @@ public sealed class GeminiToolTests(DefaultServer server) : IAsyncLifetime
     [Fact]
     public async Task GenerateImage_ReturnsLinkAndImage_AndCanBeAnalyzed()
     {
+        Assert.SkipUnless(server.HasMediaStore, GeminiServer.NoMediaStoreReason);
         var result = await _client.CallOkAsync("gemini_generate_image", new()
         {
             ["prompt"] = "A simple flat icon of a red apple on a white background",
@@ -199,7 +201,7 @@ public sealed class GeminiToolTests(DefaultServer server) : IAsyncLifetime
         });
 
         var image = Assert.Single(result.Content.OfType<ImageContentBlock>());
-        // 임시 보관본은 ResourceLink 로 오고, resources/read 로 응답의 이미지와 같은 바이트를 받을 수 있어야 합니다.
+        // S3 에 보관된 원본이 ResourceLink 로 오고, resources/read 로 응답의 이미지와 같은 바이트를 받을 수 있어야 합니다.
         var link = Assert.Single(result.Content.OfType<ResourceLinkBlock>());
         Assert.StartsWith("gemini://media/", link.Uri);
         // 이름의 확장자는 실제 이미지 형식과 일치해야 합니다.
@@ -222,6 +224,7 @@ public sealed class GeminiToolTests(DefaultServer server) : IAsyncLifetime
     [Fact]
     public async Task TextToSpeech_ReturnsWavLink_AndCanBeTranscribed()
     {
+        Assert.SkipUnless(server.HasMediaStore, GeminiServer.NoMediaStoreReason);
         var before = Directory.GetFiles(server.OutputDirectory).Length;
         var result = await _client.CallOkAsync("gemini_text_to_speech", new()
         {
@@ -229,14 +232,14 @@ public sealed class GeminiToolTests(DefaultServer server) : IAsyncLifetime
             ["voice"] = "Kore",
         });
 
-        // 출력 폴더에 영구 저장하지 않고 ResourceLink 만 돌려줍니다.
+        // 출력 폴더에는 아무것도 쓰지 않고 S3 에 보관한 뒤 ResourceLink 만 돌려줍니다.
         Assert.Equal(before, Directory.GetFiles(server.OutputDirectory).Length);
         var link = Assert.Single(result.Content.OfType<ResourceLinkBlock>());
         Assert.Equal("audio/wav", link.MimeType);
         Assert.Contains(link.Uri, result.Text());
-        // 에이전트가 곧 삭제된다는 사실을 알 수 있어야 합니다.
-        Assert.Contains("자동 삭제", result.Text());
-        Assert.Contains("자동 삭제", link.Description);
+        // 에이전트가 관리자 삭제 가능성을 알 수 있어야 합니다.
+        Assert.Contains("관리자가 대시보드에서 삭제할 수 있습니다", result.Text());
+        Assert.Contains("관리자가 삭제할 수 있음", link.Description);
 
         var read = await _client.ReadResourceAsync(link.Uri, cancellationToken: TestContext.Current.CancellationToken);
         var wav = Assert.IsType<BlobResourceContents>(Assert.Single(read.Contents)).DecodedData.ToArray();

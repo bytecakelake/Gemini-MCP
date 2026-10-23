@@ -2,9 +2,9 @@
 # Gemini MCP - Docker self-hosting helper (Linux / macOS / Git Bash)
 #
 #   docker/docker.sh setup [--share-dir DIR] [--bind 127.0.0.1] [--port 5100] [--domain "localhost, 127.0.0.1"]
-#                          [--tls-cert fullchain.pem --tls-key privkey.pem] [--s3] [--force]
+#                          [--tls-cert fullchain.pem --tls-key privkey.pem] [--force]
 #                          --tls-cert/--tls-key: use certificate files prepared by the server admin instead of MCP_TLS
-#                          --s3: store generated media in the bundled S3 container (SeaweedFS) instead of the shared folder
+#                          Generated media goes to the bundled S3 container (SeaweedFS); see .env.example for external S3.
 #   docker/docker.sh up          # build + start (runs setup first if .env is missing), waits until healthy
 #   docker/docker.sh down | restart | rebuild | logs | status
 #   docker/docker.sh cert        # export the Caddy local CA root certificate (MCP_TLS=internal) to docker/caddy-root.crt
@@ -20,7 +20,7 @@ CA_FILE="$ROOT/caddy-root.crt"
 
 COMMAND="${1:-up}"
 [ $# -gt 0 ] && shift
-SHARE_DIR="" BIND="" PORT="" DOMAIN="" TLS_CERT="" TLS_KEY="" S3=0 FORCE=0
+SHARE_DIR="" BIND="" PORT="" DOMAIN="" TLS_CERT="" TLS_KEY="" FORCE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --share-dir) SHARE_DIR="$2"; shift 2 ;;
@@ -29,7 +29,6 @@ while [ $# -gt 0 ]; do
     --domain) DOMAIN="$2"; shift 2 ;;
     --tls-cert) TLS_CERT="$2"; shift 2 ;;
     --tls-key) TLS_KEY="$2"; shift 2 ;;
-    --s3) S3=1; shift ;;
     --force) FORCE=1; shift ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -45,6 +44,30 @@ env_get() {
 }
 is_loopback() { case "$1" in 127.0.0.1|localhost|::1|"[::1]") return 0 ;; *) return 1 ;; esac; }
 compose() { (cd "$ROOT" && docker compose "$@"); }
+new_secret() { od -An -N16 -tx1 /dev/urandom | tr -d ' \n'; }
+
+# .env files created before media moved to S3 have no S3_SECRET_KEY: switch them to the bundled S3
+# (generated secret, COMPOSE_PROFILES=s3). An empty secret always means the bundled store, since external S3 needs one.
+update_media_store_settings() {
+  [ -f "$ENV_FILE" ] && [ -z "$(env_get S3_SECRET_KEY)" ] || return 0
+  local profiles secret
+  profiles="$(env_get COMPOSE_PROFILES)"
+  secret="$(new_secret)"
+  if ! grep -q '^S3_SECRET_KEY=' "$ENV_FILE"; then
+    printf '\n# Generated media store (added by docker.sh): bundled S3 (SeaweedFS). See .env.example for external S3.\nS3_SECRET_KEY=\n' >> "$ENV_FILE"
+  fi
+  sed -i.bak -e "s|^S3_SECRET_KEY=.*|S3_SECRET_KEY=$secret|" "$ENV_FILE"
+  case ",$profiles," in
+    *,s3,*) ;;
+    *) if grep -q '^COMPOSE_PROFILES=' "$ENV_FILE"; then
+         sed -i.bak -e "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=${profiles:+$profiles,}s3|" "$ENV_FILE"
+       else
+         echo "COMPOSE_PROFILES=s3" >> "$ENV_FILE"
+       fi ;;
+  esac
+  rm -f "$ENV_FILE.bak"
+  echo "Updated $ENV_FILE : generated media now goes to the bundled S3 container (S3_SECRET_KEY generated)."
+}
 # Absolute path of an existing file (Windows form under Git Bash, like HOST_SHARE_DIR).
 abs_file() {
   [ -f "$1" ] || { echo "file not found: $1" >&2; exit 1; }
@@ -76,25 +99,14 @@ setup() {
       -e "s|^MCP_TLS_KEY=.*|MCP_TLS_KEY=$key_file|" \
       -e "s|^DOCKER_UID=.*|DOCKER_UID=$(id -u)|" \
       -e "s|^DOCKER_GID=.*|DOCKER_GID=$(id -g)|" \
+      -e "s|^S3_SECRET_KEY=.*|S3_SECRET_KEY=$(new_secret)|" \
       "$ROOT/.env.example" > "$ENV_FILE"
-  if [ "$S3" -eq 1 ]; then
-    # Bundled SeaweedFS: account and bucket are created on first start from these values.
-    local secret
-    secret="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
-    sed -i.bak -e "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=s3|" \
-        -e "s|^S3_ENDPOINT=.*|S3_ENDPOINT=http://s3:8333|" \
-        -e "s|^S3_BUCKET=.*|S3_BUCKET=gemini-media|" \
-        -e "s|^S3_ACCESS_KEY=.*|S3_ACCESS_KEY=gemini-mcp|" \
-        -e "s|^S3_SECRET_KEY=.*|S3_SECRET_KEY=$secret|" "$ENV_FILE"
-    rm -f "$ENV_FILE.bak"
-  fi
   chmod 600 "$ENV_FILE"
   echo "Created $ENV_FILE"
   echo "  shared folder : $share  ->  /share (outputs: $share/gemini-mcp-output)"
   echo "  listen        : https://$bind:$port  (TLS names: $domain)"
   [ -n "$cert_file" ] && echo "  certificate   : $cert_file (key: $key_file)"
-  if [ "$S3" -eq 1 ]; then echo "  media store   : bundled S3 (SeaweedFS), bucket gemini-media"
-  else echo "  media store   : $share/gemini-mcp-output/.media"; fi
+  echo "  media store   : bundled S3 (SeaweedFS), bucket gemini-media"
   if ! is_loopback "$bind" && [ -z "$DOMAIN" ]; then
     echo "  note          : add this host's name/IP to MCP_DOMAIN in .env (or pass --domain) so remote clients get a matching certificate"
   fi
@@ -197,6 +209,7 @@ show_connection() {
 up() {
   require_docker
   [ -f "$ENV_FILE" ] || setup
+  update_media_store_settings
   require_api_key
   require_tls_files
   [ $# -gt 0 ] && compose build "$@"
@@ -217,10 +230,10 @@ case "$COMMAND" in
   up)          up ;;
   rebuild)     up --no-cache --pull ;;
   # compose validates ${GEMINI_API_KEY:?} for every command; down/logs do not need a real key.
-  down)        require_docker; GEMINI_API_KEY="$(env_get GEMINI_API_KEY)" ; GEMINI_API_KEY="${GEMINI_API_KEY:-unused}" compose down ;;
-  restart)     require_docker; require_api_key; require_tls_files; compose restart; wait_healthy; wait_proxy; show_connection ;;
+  down)        require_docker; update_media_store_settings; GEMINI_API_KEY="$(env_get GEMINI_API_KEY)" ; GEMINI_API_KEY="${GEMINI_API_KEY:-unused}" compose down ;;
+  restart)     require_docker; update_media_store_settings; require_api_key; require_tls_files; compose restart; wait_healthy; wait_proxy; show_connection ;;
   cert)        cert ;;
-  logs)        require_docker; GEMINI_API_KEY="$(env_get GEMINI_API_KEY)" ; GEMINI_API_KEY="${GEMINI_API_KEY:-unused}" compose logs -f --tail 200 ;;
+  logs)        require_docker; update_media_store_settings; GEMINI_API_KEY="$(env_get GEMINI_API_KEY)" ; GEMINI_API_KEY="${GEMINI_API_KEY:-unused}" compose logs -f --tail 200 ;;
   reset-admin) reset_admin ;;
   status)      require_docker
                docker ps -a --filter "name=^gemini-mcp" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}\t{{.Image}}'

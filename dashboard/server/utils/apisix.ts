@@ -116,7 +116,8 @@ function mcpRoute(whitelist: string[]) {
         rejected_msg: "API key is disabled or expired",
       },
       // API 키는 MCP 서버로 넘기지 않습니다 (apikey 헤더는 hide_credentials 가 지움).
-      "proxy-rewrite": { headers: { remove: ["Authorization"] } },
+      // 대신 컨슈머 이름(k_<id>)을 넘겨 생성 미디어 메타데이터에 남깁니다. set 이라 클라이언트가 보낸 값은 덮어씁니다.
+      "proxy-rewrite": { headers: { set: { "X-Mcp-Consumer": "$consumer_name" }, remove: ["Authorization"] } },
       "loki-logger": {
         endpoint_addrs: [env.loki],
         log_labels: { job: "apisix", kind: "request" },

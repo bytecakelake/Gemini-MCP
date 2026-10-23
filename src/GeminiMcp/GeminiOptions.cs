@@ -1,4 +1,3 @@
-using System.Globalization;
 using GeminiMcp.Gemini;
 
 namespace GeminiMcp;
@@ -15,11 +14,7 @@ public sealed class GeminiOptions
     public required long InlineLimitBytes { get; init; }
     public required TimeSpan RequestTimeout { get; init; }
     public required PathMapper Paths { get; init; }
-    /// <summary>생성 미디어 보관 기간. 기본 48시간(Gemini Files API 와 같음).</summary>
-    public required TimeSpan MediaTtl { get; init; }
-    /// <summary>로컬 디스크 저장소 폴더 (S3 를 쓰지 않을 때).</summary>
-    public required string MediaDirectory { get; init; }
-    /// <summary>S3 호환 저장소 설정. null 이면 로컬 디스크에 보관합니다.</summary>
+    /// <summary>생성 미디어를 보관할 S3 호환 저장소. null 이면 미디어 생성 도구가 오류를 반환합니다.</summary>
     public required S3Settings? S3 { get; init; }
     /// <summary>미디어 다운로드 URL 의 기준 주소 (예: https://mcp.example.com). 없으면 요청의 Host 로 만듭니다.</summary>
     public required string? PublicUrl { get; init; }
@@ -40,15 +35,6 @@ public sealed class GeminiOptions
         var defaultOutput = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "gemini-mcp-output");
 
-        var ttlHours = Get("GEMINI_MCP_MEDIA_TTL_HOURS");
-        var mediaTtl = MediaStore.DefaultTtl;
-        if (ttlHours is not null)
-        {
-            if (!double.TryParse(ttlHours, NumberStyles.Float, CultureInfo.InvariantCulture, out var hours) || hours <= 0)
-                throw new FormatException($"GEMINI_MCP_MEDIA_TTL_HOURS 는 0 보다 큰 숫자(시간)여야 합니다: '{ttlHours}'");
-            mediaTtl = TimeSpan.FromHours(hours);
-        }
-
         return new GeminiOptions
         {
             ApiKey = Get("GEMINI_API_KEY", "GOOGLE_API_KEY", "Gemini:ApiKey"),
@@ -58,8 +44,6 @@ public sealed class GeminiOptions
             RequestTimeout = TimeSpan.FromSeconds(
                 int.TryParse(Get("GEMINI_TIMEOUT_SECONDS"), out var seconds) ? seconds : 600),
             Paths = new PathMapper(Get("GEMINI_MCP_PATH_MAPS")),
-            MediaTtl = mediaTtl,
-            MediaDirectory = Get("GEMINI_MCP_MEDIA_DIR", "Gemini:MediaDirectory") ?? Path.Combine(Path.GetTempPath(), "gemini-mcp-media"),
             S3 = ReadS3(Get),
             PublicUrl = Get("GEMINI_MCP_PUBLIC_URL")?.TrimEnd('/'),
         };

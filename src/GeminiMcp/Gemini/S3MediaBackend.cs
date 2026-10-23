@@ -1,7 +1,6 @@
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
-using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Xml.Linq;
@@ -13,12 +12,15 @@ public sealed record S3Settings(
     Uri Endpoint, string Bucket, string Region, string AccessKey, string SecretKey, string Prefix, bool PathStyle);
 
 /// <summary>
-/// S3 호환 저장소. AWS SDK 대신 Signature V4 를 직접 구현해 Native AOT 에서도 동작합니다.
-/// 만료 판단은 객체의 LastModified 기준이며, 정리는 ListObjectsV2 + DeleteObject 로 합니다 (수명 주기 규칙 불필요).
+/// S3 호환 저장소 클라이언트. AWS SDK 대신 Signature V4 를 직접 구현해 Native AOT 에서도 동작합니다.
+/// 메타데이터는 x-amz-meta-* 헤더에 퍼센트 인코딩해 둡니다 (S3 사용자 메타데이터는 US-ASCII 만 허용).
 /// </summary>
-public sealed class S3MediaBackend(S3Settings settings, HttpClient http) : IMediaBackend
+public sealed class S3MediaBackend(S3Settings settings, HttpClient http)
 {
     private const string EmptyPayloadHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    private const string MetaPrefix = "x-amz-meta-";
+    /// <summary>프롬프트 메타데이터 최대 길이 (인코딩 후 바이트). S3 사용자 메타데이터 전체 한도는 2KB 입니다.</summary>
+    private const int MaxPromptBytes = 1200;
     private static readonly XNamespace S3Xml = "http://s3.amazonaws.com/doc/2006-03-01/";
 
     public string Description => $"S3 {settings.Endpoint.GetLeftPart(UriPartial.Authority)} bucket={settings.Bucket} prefix={settings.Prefix}";
@@ -26,7 +28,7 @@ public sealed class S3MediaBackend(S3Settings settings, HttpClient http) : IMedi
     /// <summary>버킷이 없으면 만듭니다 (compose 의 내장 S3 처럼 비어 있는 저장소용).</summary>
     public async Task InitializeAsync(CancellationToken ct)
     {
-        using var head = await SendAsync(HttpMethod.Head, BucketUri(), null, null, ct);
+        using var head = await SendAsync(HttpMethod.Head, BucketUri(), null, null, null, ct);
         if (head.IsSuccessStatusCode)
             return;
         if (head.StatusCode != HttpStatusCode.NotFound)
@@ -36,19 +38,32 @@ public sealed class S3MediaBackend(S3Settings settings, HttpClient http) : IMedi
             ? null
             : Encoding.UTF8.GetBytes(
                 $"<CreateBucketConfiguration xmlns=\"{S3Xml.NamespaceName}\"><LocationConstraint>{settings.Region}</LocationConstraint></CreateBucketConfiguration>");
-        using var create = await SendAsync(HttpMethod.Put, BucketUri(), body, body is null ? null : "application/xml", ct);
+        using var create = await SendAsync(HttpMethod.Put, BucketUri(), body, body is null ? null : "application/xml", null, ct);
         await EnsureSuccessAsync(create, $"S3 버킷 생성 실패: {settings.Bucket}", ct);
     }
 
-    public async Task PutAsync(string name, byte[] data, string mimeType, CancellationToken ct)
+    public async Task PutAsync(string name, byte[] data, string mimeType, MediaMetadata metadata, CancellationToken ct)
     {
-        using var response = await SendAsync(HttpMethod.Put, ObjectUri(name), data, mimeType, ct);
+        var meta = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        void Add(string key, string? value)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+                meta[MetaPrefix + key] = Uri.EscapeDataString(value.Trim());
+        }
+        Add("tool", metadata.Tool);
+        Add("model", metadata.Model);
+        Add("consumer", metadata.Consumer);
+        Add("interaction-id", metadata.InteractionId);
+        if (metadata.Prompt is { } prompt)
+            meta[MetaPrefix + "prompt"] = EncodeTruncated(prompt.Trim(), MaxPromptBytes);
+
+        using var response = await SendAsync(HttpMethod.Put, ObjectUri(name), data, mimeType, meta, ct);
         await EnsureSuccessAsync(response, $"S3 업로드 실패: {name}", ct);
     }
 
     public async Task<MediaObject?> OpenAsync(string name, CancellationToken ct)
     {
-        var response = await SendAsync(HttpMethod.Get, ObjectUri(name), null, null, ct, HttpCompletionOption.ResponseHeadersRead);
+        var response = await SendAsync(HttpMethod.Get, ObjectUri(name), null, null, null, ct, HttpCompletionOption.ResponseHeadersRead);
         if (response.StatusCode == HttpStatusCode.NotFound)
         {
             response.Dispose();
@@ -58,12 +73,8 @@ public sealed class S3MediaBackend(S3Settings settings, HttpClient http) : IMedi
         {
             await EnsureSuccessAsync(response, $"S3 다운로드 실패: {name}", ct);
             var headers = response.Content.Headers;
-            var mime = headers.ContentType?.MediaType is { Length: > 0 } type && type != "application/octet-stream"
-                ? type
-                : MimeTypes.FromPath(name);
-            var lastModified = headers.LastModified?.UtcDateTime ?? DateTime.UtcNow;
             var stream = await response.Content.ReadAsStreamAsync(ct);
-            return new MediaObject(stream, headers.ContentLength, mime, lastModified, response);
+            return new MediaObject(stream, headers.ContentLength, MimeOf(headers, name), headers.LastModified?.UtcDateTime ?? DateTime.UtcNow, response);
         }
         catch
         {
@@ -72,43 +83,138 @@ public sealed class S3MediaBackend(S3Settings settings, HttpClient http) : IMedi
         }
     }
 
-    public async IAsyncEnumerable<(string Name, DateTime LastModifiedUtc)> ListAsync([EnumeratorCancellation] CancellationToken ct)
+    /// <summary>ListObjectsV2 한 페이지 + 객체별 HEAD(메타데이터). cursor 는 S3 continuation token 입니다.</summary>
+    public async Task<MediaPage> ListAsync(string? cursor, int limit, CancellationToken ct)
     {
-        string? token = null;
+        var (objects, next) = await ListObjectsAsync(cursor, limit, ct);
+        var items = new MediaInfo?[objects.Count];
+        await Parallel.ForEachAsync(Enumerable.Range(0, objects.Count), new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct },
+            async (i, token) => items[i] = await HeadAsync(objects[i].Name, objects[i], token));
+        return new MediaPage(items.OfType<MediaInfo>().ToList(), next);
+    }
+
+    public async Task<MediaStats> StatsAsync(CancellationToken ct)
+    {
+        long count = 0, bytes = 0;
+        string? cursor = null;
         do
         {
-            var query = new SortedDictionary<string, string>(StringComparer.Ordinal) { ["list-type"] = "2", ["prefix"] = settings.Prefix };
-            if (token is not null)
-                query["continuation-token"] = token;
-
-            using var response = await SendAsync(HttpMethod.Get, BucketUri(query), null, null, ct);
-            await EnsureSuccessAsync(response, "S3 목록 조회 실패", ct);
-            var xml = XDocument.Parse(await response.Content.ReadAsStringAsync(ct));
-            var root = xml.Root!;
-            // 일부 호환 서버는 네임스페이스 없이 응답하므로 로컬 이름으로 찾습니다.
-            foreach (var item in root.Elements().Where(e => e.Name.LocalName == "Contents"))
-            {
-                var key = Child(item, "Key");
-                var modified = Child(item, "LastModified");
-                if (key is null || modified is null || !key.StartsWith(settings.Prefix, StringComparison.Ordinal))
-                    continue;
-                var name = key[settings.Prefix.Length..];
-                if (name.Length > 0 && !name.Contains('/'))
-                    yield return (name, DateTime.Parse(modified, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal));
-            }
-            token = Child(root, "IsTruncated") == "true" ? Child(root, "NextContinuationToken") : null;
+            var (objects, next) = await ListObjectsAsync(cursor, 1000, ct);
+            count += objects.Count;
+            bytes += objects.Sum(o => o.Size);
+            cursor = next;
         }
-        while (token is not null);
+        while (cursor is not null);
+        return new MediaStats(count, bytes, Description);
     }
 
-    public async Task DeleteAsync(string name, CancellationToken ct)
+    /// <returns>지웠으면 true, 없으면 false (S3 DELETE 는 없는 키에도 204 를 주므로 HEAD 로 먼저 확인합니다).</returns>
+    public async Task<bool> DeleteAsync(string name, CancellationToken ct)
     {
-        using var response = await SendAsync(HttpMethod.Delete, ObjectUri(name), null, null, ct);
-        if (response.StatusCode != HttpStatusCode.NotFound)
-            await EnsureSuccessAsync(response, $"S3 삭제 실패: {name}", ct);
+        using (var head = await SendAsync(HttpMethod.Head, ObjectUri(name), null, null, null, ct))
+        {
+            if (head.StatusCode == HttpStatusCode.NotFound)
+                return false;
+            await EnsureSuccessAsync(head, $"S3 조회 실패: {name}", ct);
+        }
+        using var response = await SendAsync(HttpMethod.Delete, ObjectUri(name), null, null, null, ct);
+        await EnsureSuccessAsync(response, $"S3 삭제 실패: {name}", ct);
+        return true;
     }
 
-    public string? LocalPath(string name) => null;
+    private sealed record S3Object(string Name, long Size, DateTimeOffset LastModified);
+
+    private async Task<(List<S3Object> Objects, string? Next)> ListObjectsAsync(string? cursor, int limit, CancellationToken ct)
+    {
+        var query = new SortedDictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["list-type"] = "2",
+            ["prefix"] = settings.Prefix,
+            ["max-keys"] = limit.ToString(CultureInfo.InvariantCulture),
+        };
+        if (!string.IsNullOrEmpty(cursor))
+            query["continuation-token"] = cursor;
+
+        using var response = await SendAsync(HttpMethod.Get, BucketUri(query), null, null, null, ct);
+        await EnsureSuccessAsync(response, "S3 목록 조회 실패", ct);
+        var root = XDocument.Parse(await response.Content.ReadAsStringAsync(ct)).Root!;
+
+        var objects = new List<S3Object>();
+        // 일부 호환 서버는 네임스페이스 없이 응답하므로 로컬 이름으로 찾습니다.
+        foreach (var item in root.Elements().Where(e => e.Name.LocalName == "Contents"))
+        {
+            var key = Child(item, "Key");
+            if (key is null || !key.StartsWith(settings.Prefix, StringComparison.Ordinal))
+                continue;
+            var name = key[settings.Prefix.Length..];
+            if (MediaStore.ToName(name) != name)
+                continue;
+            var size = long.TryParse(Child(item, "Size"), CultureInfo.InvariantCulture, out var s) ? s : 0;
+            var modified = DateTimeOffset.TryParse(Child(item, "LastModified"), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var m)
+                ? m
+                : DateTimeOffset.UtcNow;
+            objects.Add(new S3Object(name, size, modified));
+        }
+        var next = Child(root, "IsTruncated") == "true" ? Child(root, "NextContinuationToken") : null;
+        return (objects, string.IsNullOrEmpty(next) ? null : next);
+    }
+
+    private async Task<MediaInfo?> HeadAsync(string name, S3Object listed, CancellationToken ct)
+    {
+        using var response = await SendAsync(HttpMethod.Head, ObjectUri(name), null, null, null, ct);
+        if (response.StatusCode == HttpStatusCode.NotFound)
+            return null; // 목록 조회와 HEAD 사이에 지워진 객체
+        await EnsureSuccessAsync(response, $"S3 조회 실패: {name}", ct);
+
+        string? Meta(string key) =>
+            response.Headers.TryGetValues(MetaPrefix + key, out var values) && values.FirstOrDefault() is { Length: > 0 } value
+                ? Decode(value)
+                : null;
+
+        var headers = response.Content.Headers;
+        return new MediaInfo(
+            name,
+            headers.ContentLength ?? listed.Size,
+            MimeOf(headers, name),
+            headers.LastModified ?? listed.LastModified,
+            Meta("tool"), Meta("model"), Meta("prompt"), Meta("consumer"), Meta("interaction-id"));
+    }
+
+    private static string MimeOf(HttpContentHeaders headers, string name) =>
+        headers.ContentType?.MediaType is { Length: > 0 } type && type != "application/octet-stream" ? type : MimeTypes.FromPath(name);
+
+    private static string Decode(string value)
+    {
+        try
+        {
+            return Uri.UnescapeDataString(value);
+        }
+        catch (UriFormatException)
+        {
+            return value;
+        }
+    }
+
+    /// <summary>퍼센트 인코딩 결과가 maxBytes 를 넘지 않도록 앞에서부터 잘라 인코딩합니다 (서로게이트 쌍은 나누지 않음).</summary>
+    private static string EncodeTruncated(string value, int maxBytes)
+    {
+        var encoded = Uri.EscapeDataString(value);
+        if (encoded.Length <= maxBytes)
+            return encoded;
+
+        var result = new StringBuilder();
+        const string ellipsis = "%E2%80%A6"; // …
+        for (var i = 0; i < value.Length; i++)
+        {
+            var length = char.IsHighSurrogate(value[i]) && i + 1 < value.Length ? 2 : 1;
+            var piece = Uri.EscapeDataString(value.Substring(i, length));
+            if (result.Length + piece.Length + ellipsis.Length > maxBytes)
+                break;
+            result.Append(piece);
+            i += length - 1;
+        }
+        return result.Append(ellipsis).ToString();
+    }
 
     private static string? Child(XElement parent, string localName) =>
         parent.Elements().FirstOrDefault(e => e.Name.LocalName == localName)?.Value;
@@ -141,7 +247,7 @@ public sealed class S3MediaBackend(S3Settings settings, HttpClient http) : IMedi
         string.Join('&', query.Select(kv => $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
 
     private async Task<HttpResponseMessage> SendAsync(
-        HttpMethod method, Uri uri, byte[]? body, string? contentType, CancellationToken ct,
+        HttpMethod method, Uri uri, byte[]? body, string? contentType, SortedDictionary<string, string>? amzHeaders, CancellationToken ct,
         HttpCompletionOption completion = HttpCompletionOption.ResponseContentRead)
     {
         using var request = new HttpRequestMessage(method, uri);
@@ -151,27 +257,38 @@ public sealed class S3MediaBackend(S3Settings settings, HttpClient http) : IMedi
             if (contentType is not null)
                 request.Content.Headers.ContentType = MediaTypeHeaderValue.Parse(contentType);
         }
-        Sign(request, uri, body is null ? EmptyPayloadHash : Hex(SHA256.HashData(body)));
+        Sign(request, uri, body is null ? EmptyPayloadHash : Hex(SHA256.HashData(body)), amzHeaders);
         return await http.SendAsync(request, completion, ct);
     }
 
-    /// <summary>AWS Signature Version 4 (헤더 방식). host, x-amz-content-sha256, x-amz-date 만 서명합니다.</summary>
-    private void Sign(HttpRequestMessage request, Uri uri, string payloadHash)
+    /// <summary>
+    /// AWS Signature Version 4 (헤더 방식). host, x-amz-content-sha256, x-amz-date 와
+    /// 요청에 넣는 모든 x-amz-meta-* 헤더를 서명합니다 (S3 는 x-amz-* 헤더의 서명을 요구).
+    /// </summary>
+    private void Sign(HttpRequestMessage request, Uri uri, string payloadHash, SortedDictionary<string, string>? amzHeaders)
     {
         var now = DateTime.UtcNow;
         var amzDate = now.ToString("yyyyMMdd'T'HHmmss'Z'", CultureInfo.InvariantCulture);
         var date = now.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
         var host = uri.IsDefaultPort ? uri.Host : $"{uri.Host}:{uri.Port}";
-        const string signedHeaders = "host;x-amz-content-sha256;x-amz-date";
 
+        // 정렬 순서: host < x-amz-content-sha256 < x-amz-date < x-amz-meta-*
+        var headers = new List<(string Name, string Value)>
+        {
+            ("host", host),
+            ("x-amz-content-sha256", payloadHash),
+            ("x-amz-date", amzDate),
+        };
+        if (amzHeaders is not null)
+            headers.AddRange(amzHeaders.Select(kv => (kv.Key.ToLowerInvariant(), kv.Value.Trim())));
+        headers.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
+
+        var signedHeaders = string.Join(';', headers.Select(h => h.Name));
         var canonicalRequest = string.Join('\n',
             request.Method.Method,
             uri.AbsolutePath,
             uri.Query.TrimStart('?'),
-            $"host:{host}",
-            $"x-amz-content-sha256:{payloadHash}",
-            $"x-amz-date:{amzDate}",
-            "",
+            string.Concat(headers.Select(h => $"{h.Name}:{h.Value}\n")),
             signedHeaders,
             payloadHash);
 
@@ -184,8 +301,8 @@ public sealed class S3MediaBackend(S3Settings settings, HttpClient http) : IMedi
         key = Hmac(key, "aws4_request");
         var signature = Hex(Hmac(key, stringToSign));
 
-        request.Headers.TryAddWithoutValidation("x-amz-date", amzDate);
-        request.Headers.TryAddWithoutValidation("x-amz-content-sha256", payloadHash);
+        foreach (var (name, value) in headers.Where(h => h.Name != "host"))
+            request.Headers.TryAddWithoutValidation(name, value);
         request.Headers.TryAddWithoutValidation("Authorization",
             $"AWS4-HMAC-SHA256 Credential={settings.AccessKey}/{scope}, SignedHeaders={signedHeaders}, Signature={signature}");
     }
