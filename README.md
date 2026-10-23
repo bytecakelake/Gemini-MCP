@@ -116,7 +116,9 @@ docker compose 를 직접 쓰는 경우: `docker compose -f docker/docker-compos
 
 ### TLS · 압축 (Caddy)
 
-- **주소**: `https://127.0.0.1:5100/` (대시보드), `https://127.0.0.1:5100/mcp` (MCP). `MCP_BIND`/`MCP_PORT` 로 변경. 평문 HTTP 는 받지 않습니다.
+- **주소**: `https://127.0.0.1:5100/` (대시보드), `https://127.0.0.1:5100/mcp` (MCP). `MCP_BIND`/`MCP_PORT` 로 변경.
+  같은 포트로 평문 `http://` 요청이 오면 Caddy 의 `http_redirect` 리스너가 `https://` 로 308 리다이렉트합니다(경로·쿼리·메서드·본문 유지).
+  이후 TLS ALPN 으로 HTTP/2 가 협상되고, `Alt-Svc` 로 광고한 HTTP/3 로 브라우저가 자동 전환합니다. 평문으로 내용을 주고받지는 않습니다.
 - **인증서** (`MCP_TLS`)
   - `internal`(기본): Caddy 가 자체 로컬 CA 로 `MCP_DOMAIN`(기본 `localhost, 127.0.0.1`)의 인증서를 발급·갱신합니다.
     클라이언트가 루트 인증서를 신뢰해야 하므로 `up` 후 한 번 `cert` 를 실행하고, Claude Code(Node.js)에는 `NODE_EXTRA_CA_CERTS` 로 지정하세요.

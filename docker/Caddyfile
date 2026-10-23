@@ -12,6 +12,16 @@
 	https_port {$MCP_PORT}
 	default_sni {$MCP_DEFAULT_SNI}
 	# 로컬 CA 루트는 시작할 때마다 컨테이너 신뢰 저장소(tmpfs)에 설치됩니다. 클라이언트 쪽 신뢰는 `cert` 명령으로.
+
+	servers {
+		# HTTPS 포트로 평문 HTTP 가 들어오면 400("Client sent an HTTP request to an HTTPS server") 대신
+		# 같은 포트의 https:// 로 308 리다이렉트합니다(메서드·본문 유지). 이후 TLS ALPN 으로 HTTP/2 를 쓰고,
+		# Alt-Svc 로 광고한 HTTP/3(UDP) 로 자동 전환됩니다.
+		listener_wrappers {
+			http_redirect
+			tls
+		}
+	}
 }
 
 {$MCP_DOMAIN} {
