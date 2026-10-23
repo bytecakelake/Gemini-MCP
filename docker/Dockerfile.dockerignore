@@ -1,0 +1,11 @@
+# docker/Dockerfile 전용 제외 목록 (BuildKit). 경로는 빌드 컨텍스트(저장소 루트) 기준입니다.
+**/bin/
+**/obj/
+publish/
+TestResults/
+tests/
+docker/
+.vs/
+.git/
+**/.env
+*.user
