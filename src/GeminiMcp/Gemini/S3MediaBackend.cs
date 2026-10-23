@@ -9,7 +9,7 @@ namespace GeminiMcp.Gemini;
 
 /// <summary>S3 호환 객체 저장소 설정 (AWS S3, Cloudflare R2, SeaweedFS, Garage 등).</summary>
 public sealed record S3Settings(
-    Uri Endpoint, string Bucket, string Region, string AccessKey, string SecretKey, string Prefix, bool PathStyle);
+    Uri Endpoint, string Bucket, string Region, string AccessKey, string SecretKey, bool PathStyle);
 
 /// <summary>
 /// S3 호환 저장소 클라이언트. AWS SDK 대신 Signature V4 를 직접 구현해 Native AOT 에서도 동작합니다.
@@ -23,7 +23,7 @@ public sealed class S3MediaBackend(S3Settings settings, HttpClient http)
     private const int MaxPromptBytes = 1200;
     private static readonly XNamespace S3Xml = "http://s3.amazonaws.com/doc/2006-03-01/";
 
-    public string Description => $"S3 {settings.Endpoint.GetLeftPart(UriPartial.Authority)} bucket={settings.Bucket} prefix={settings.Prefix}";
+    public string Description => $"S3 {settings.Endpoint.GetLeftPart(UriPartial.Authority)} bucket={settings.Bucket}";
 
     /// <summary>버킷이 없으면 만듭니다 (compose 의 내장 S3 처럼 비어 있는 저장소용).</summary>
     public async Task InitializeAsync(CancellationToken ct)
@@ -129,7 +129,6 @@ public sealed class S3MediaBackend(S3Settings settings, HttpClient http)
         var query = new SortedDictionary<string, string>(StringComparer.Ordinal)
         {
             ["list-type"] = "2",
-            ["prefix"] = settings.Prefix,
             ["max-keys"] = limit.ToString(CultureInfo.InvariantCulture),
         };
         if (!string.IsNullOrEmpty(cursor))
@@ -143,11 +142,9 @@ public sealed class S3MediaBackend(S3Settings settings, HttpClient http)
         // 일부 호환 서버는 네임스페이스 없이 응답하므로 로컬 이름으로 찾습니다.
         foreach (var item in root.Elements().Where(e => e.Name.LocalName == "Contents"))
         {
-            var key = Child(item, "Key");
-            if (key is null || !key.StartsWith(settings.Prefix, StringComparison.Ordinal))
-                continue;
-            var name = key[settings.Prefix.Length..];
-            if (MediaStore.ToName(name) != name)
+            // 미디어 이름 형식이 아닌 객체(버킷을 함께 쓰는 다른 파일)는 건너뜁니다.
+            var name = Child(item, "Key");
+            if (name is null || MediaStore.ToName(name) != name)
                 continue;
             var size = long.TryParse(Child(item, "Size"), CultureInfo.InvariantCulture, out var s) ? s : 0;
             var modified = DateTimeOffset.TryParse(Child(item, "LastModified"), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var m)
@@ -219,7 +216,7 @@ public sealed class S3MediaBackend(S3Settings settings, HttpClient http)
     private static string? Child(XElement parent, string localName) =>
         parent.Elements().FirstOrDefault(e => e.Name.LocalName == localName)?.Value;
 
-    private Uri ObjectUri(string name) => Build("/" + Escape(settings.Prefix + name), null);
+    private Uri ObjectUri(string name) => Build("/" + Escape(name), null);
 
     private Uri BucketUri(SortedDictionary<string, string>? query = null) => Build("/", query);
 

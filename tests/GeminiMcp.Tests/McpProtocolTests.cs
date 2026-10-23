@@ -147,16 +147,25 @@ public sealed class McpProtocolTests(DefaultServer server) : IAsyncLifetime
     }
 
     [Fact]
-    public async Task MissingLocalFile_ReturnsToolError()
+    public async Task LocalFilePath_IsRejected()
     {
-        var result = await _client.CallToolAsync("gemini_analyze_media", new Dictionary<string, object?>
+        // 서버 PC 에 실제로 있는 파일이어도 로컬 경로는 읽지 않습니다.
+        var file = Path.GetTempFileName();
+        try
         {
-            ["files"] = new[] { @"C:\no\such\file.mp4" },
-            ["prompt"] = "x",
-        }, cancellationToken: Ct);
+            var result = await _client.CallToolAsync("gemini_analyze_media", new Dictionary<string, object?>
+            {
+                ["files"] = new[] { file },
+                ["prompt"] = "x",
+            }, cancellationToken: Ct);
 
-        Assert.True(result.IsError);
-        Assert.Contains("파일을 찾을 수 없습니다", result.Text());
+            Assert.True(result.IsError);
+            Assert.Contains("로컬 파일 경로는 읽지 않습니다", result.Text());
+        }
+        finally
+        {
+            File.Delete(file);
+        }
     }
 
     [Fact]

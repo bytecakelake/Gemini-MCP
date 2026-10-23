@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Gemini MCP - Docker self-hosting helper (Linux / macOS / Git Bash)
 #
-#   docker/docker.sh setup [--share-dir DIR] [--bind 127.0.0.1] [--port 5100] [--domain "localhost, 127.0.0.1"]
+#   docker/docker.sh setup [--bind 127.0.0.1] [--port 5100] [--domain "localhost, 127.0.0.1"]
 #                          [--tls-cert fullchain.pem --tls-key privkey.pem] [--bundled-s3] [--force]
 #                          --tls-cert/--tls-key: use certificate files prepared by the server admin instead of MCP_TLS
 #                          --bundled-s3: also run the bundled S3 container (docker-compose.s3.yml) for generated media.
@@ -21,10 +21,9 @@ CA_FILE="$ROOT/caddy-root.crt"
 
 COMMAND="${1:-up}"
 [ $# -gt 0 ] && shift
-SHARE_DIR="" BIND="" PORT="" DOMAIN="" TLS_CERT="" TLS_KEY="" BUNDLED_S3=0 FORCE=0
+BIND="" PORT="" DOMAIN="" TLS_CERT="" TLS_KEY="" BUNDLED_S3=0 FORCE=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --share-dir) SHARE_DIR="$2"; shift 2 ;;
     --bind) BIND="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
     --domain) DOMAIN="$2"; shift 2 ;;
@@ -63,7 +62,7 @@ COMPOSE_FILE=docker-compose.yml:docker-compose.s3.yml|" "$ENV_FILE"
   rm -f "$ENV_FILE.bak"
   echo "Updated $ENV_FILE : the bundled S3 now comes from docker-compose.s3.yml (COMPOSE_FILE)."
 }
-# Absolute path of an existing file (Windows form under Git Bash, like HOST_SHARE_DIR).
+# Absolute path of an existing file (Windows form under Git Bash, which docker compose expects there).
 abs_file() {
   [ -f "$1" ] || { echo "file not found: $1" >&2; exit 1; }
   local path; path="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
@@ -75,10 +74,7 @@ setup() {
   if [ -f "$ENV_FILE" ] && [ "$FORCE" -eq 0 ]; then
     echo ".env already exists (use --force to regenerate): $ENV_FILE"; return
   fi
-  local share bind port domain cert_file="" key_file=""
-  share="$(cd "${SHARE_DIR:-$HOME}" && pwd)"
-  # Git Bash on Windows: Claude passes C:\... paths, so store the Windows form.
-  command -v cygpath >/dev/null 2>&1 && share="$(cygpath -w "$share")"
+  local bind port domain cert_file="" key_file=""
   bind="${BIND:-127.0.0.1}"
   port="${PORT:-5100}"
   domain="${DOMAIN:-localhost, 127.0.0.1}"
@@ -92,19 +88,15 @@ setup() {
              -e "s|^#COMPOSE_FILE=|COMPOSE_FILE=|"
              -e "s|^S3_SECRET_KEY=.*|S3_SECRET_KEY=$(new_secret)|")
   fi
-  sed -e "s|^HOST_SHARE_DIR=.*|HOST_SHARE_DIR=$share|" \
-      -e "s|^MCP_BIND=.*|MCP_BIND=$bind|" \
+  sed -e "s|^MCP_BIND=.*|MCP_BIND=$bind|" \
       -e "s|^MCP_PORT=.*|MCP_PORT=$port|" \
       -e "s|^MCP_DOMAIN=.*|MCP_DOMAIN=$domain|" \
       -e "s|^MCP_TLS_CERT=.*|MCP_TLS_CERT=$cert_file|" \
       -e "s|^MCP_TLS_KEY=.*|MCP_TLS_KEY=$key_file|" \
-      -e "s|^DOCKER_UID=.*|DOCKER_UID=$(id -u)|" \
-      -e "s|^DOCKER_GID=.*|DOCKER_GID=$(id -g)|" \
       ${s3_args[@]+"${s3_args[@]}"} \
       "$ROOT/.env.example" > "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   echo "Created $ENV_FILE"
-  echo "  shared folder : $share  ->  /share (outputs: $share/gemini-mcp-output)"
   echo "  listen        : https://$bind:$port  (TLS names: $domain)"
   [ -n "$cert_file" ] && echo "  certificate   : $cert_file (key: $key_file)"
   if [ "$BUNDLED_S3" -eq 1 ]; then

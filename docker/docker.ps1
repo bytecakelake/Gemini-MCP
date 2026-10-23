@@ -1,6 +1,6 @@
 # Gemini MCP - Docker self-hosting helper (Windows PowerShell 5.1+ / PowerShell 7)
 #
-#   .\docker\docker.ps1 setup [-ShareDir C:\Users\me] [-Bind 127.0.0.1] [-Port 5100] [-Domain "localhost, 127.0.0.1"]
+#   .\docker\docker.ps1 setup [-Bind 127.0.0.1] [-Port 5100] [-Domain "localhost, 127.0.0.1"]
 #                                   [-TlsCert fullchain.pem -TlsKey privkey.pem] [-BundledS3] [-Force]
 #                                   -TlsCert/-TlsKey: use certificate files prepared by the server admin instead of MCP_TLS
 #                                   -BundledS3: also run the bundled S3 container (docker-compose.s3.yml) for generated media.
@@ -15,7 +15,6 @@
 #   .\docker\docker.ps1 reset-admin # forgot the dashboard password: delete the admin account; a new setup code is logged
 param(
     [Parameter(Position = 0)][ValidateSet("setup", "up", "down", "restart", "rebuild", "logs", "status", "cert", "reset-admin")][string]$Command = "up",
-    [string]$ShareDir,
     [string]$Bind,
     [int]$Port,
     [string]$Domain,
@@ -73,7 +72,6 @@ function Invoke-Setup {
         Write-Host ".env already exists (use -Force to regenerate): $envFile"
         return
     }
-    $share = if ($ShareDir) { (Resolve-Path $ShareDir -ErrorAction Stop).Path } else { [Environment]::GetFolderPath("UserProfile") }
     $bindAddress = if ($Bind) { $Bind } else { "127.0.0.1" }
     $portNumber = if ($Port) { $Port } else { 5100 }
     $domainNames = if ($Domain) { $Domain } else { "localhost, 127.0.0.1" }
@@ -83,7 +81,6 @@ function Invoke-Setup {
 
     $template = [IO.File]::ReadAllText((Join-Path $root ".env.example"))
     $content = $template `
-        -replace '(?m)^HOST_SHARE_DIR=.*$', "HOST_SHARE_DIR=$share" `
         -replace '(?m)^MCP_BIND=.*$', "MCP_BIND=$bindAddress" `
         -replace '(?m)^MCP_PORT=.*$', "MCP_PORT=$portNumber" `
         -replace '(?m)^MCP_DOMAIN=.*$', "MCP_DOMAIN=$domainNames" `
@@ -97,7 +94,6 @@ function Invoke-Setup {
     [IO.File]::WriteAllText($envFile, $content, (New-Object Text.UTF8Encoding $false))
 
     Write-Host "Created $envFile"
-    Write-Host "  shared folder : $share  ->  /share (outputs: $share\gemini-mcp-output)"
     Write-Host "  listen        : https://${bindAddress}:$portNumber  (TLS names: $domainNames)"
     if ($certFile) { Write-Host "  certificate   : $certFile (key: $keyFile)" }
     if ($BundledS3) {

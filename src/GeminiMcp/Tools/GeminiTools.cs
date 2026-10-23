@@ -21,11 +21,11 @@ public sealed class GeminiTools(
     [McpServerTool(Name = "gemini_ask", Title = "Ask Gemini", ReadOnly = true, OpenWorld = true)]
     [Description("""
         Gemini 에게 프롬프트를 보내고 답변을 받습니다. 세컨드 오피니언, 교차 검증, 1M 토큰급 대용량 문서/코드 분석,
-        JSON 구조화 출력에 사용합니다. files 로 로컬 파일/URL(이미지, PDF, 영상, 오디오, 텍스트)을 함께 첨부할 수 있습니다.
+        JSON 구조화 출력에 사용합니다. files 로 URL(이미지, PDF, 영상, 오디오, 텍스트)을 함께 첨부할 수 있습니다.
         """)]
     public async Task<string> AskAsync(
         [Description("Gemini 에게 보낼 질문/지시문")] string prompt,
-        [Description("첨부할 파일들: 서버 PC 의 절대 경로, http(s) URL, YouTube URL")] string[]? files = null,
+        [Description("첨부할 파일들: http(s) URL, YouTube URL, gemini://media/ URI (로컬 파일 경로는 지원하지 않음)")] string[]? files = null,
         [Description("시스템 지시문(역할, 말투, 규칙)")] string? system_instruction = null,
         [Description("모델 이름 또는 용도 별칭 'flash'/'pro'. 생략 시 gemini_select_model 로 선택된 text 모델. 예: gemini-3.1-pro-preview")] string? model = null,
         [Description("0.0~2.0 샘플링 온도")] double? temperature = null,
@@ -102,10 +102,10 @@ public sealed class GeminiTools(
     [Description("""
         Claude 가 직접 처리할 수 없는 영상·오디오(그리고 이미지, 대용량 PDF)를 Gemini 로 분석합니다.
         영상 요약, 타임스탬프별 장면 설명, 음성 받아쓰기(전사), 화자 구분, 번역, 회의록 작성 등에 사용합니다.
-        로컬 파일(큰 파일은 자동으로 Files API 업로드), http(s) URL, YouTube URL 을 지원합니다.
+        http(s) URL(큰 파일은 자동으로 Files API 업로드), YouTube URL, gemini://media/ URI 를 지원합니다. 로컬 파일 경로는 읽지 않습니다.
         """)]
     public async Task<string> AnalyzeMediaAsync(
-        [Description("분석할 미디어: 서버 PC 의 절대 경로, http(s) URL, YouTube URL")] string[] files,
+        [Description("분석할 미디어: http(s) URL, YouTube URL, gemini://media/ URI")] string[] files,
         [Description("수행할 작업. 예: '타임스탬프와 함께 요약', '화자 구분하여 전사'")] string prompt,
         [Description("모델 이름 또는 용도 별칭 'flash'/'pro'. 생략 시 gemini_select_model 로 선택된 text 모델")] string? model = null,
         CancellationToken cancellationToken = default)
@@ -127,7 +127,7 @@ public sealed class GeminiTools(
         """)]
     public async Task<string> RunCodeAsync(
         [Description("코드를 작성·실행해 해결할 작업")] string task,
-        [Description("함께 제공할 데이터 파일 (경로/URL)")] string[]? files = null,
+        [Description("함께 제공할 데이터 파일 (http(s) URL 또는 gemini://media/ URI)")] string[]? files = null,
         [Description("모델 이름 또는 용도 별칭 'flash'/'pro'. 생략 시 gemini_select_model 로 선택된 text 모델")] string? model = null,
         CancellationToken cancellationToken = default)
     {
@@ -148,7 +148,7 @@ public sealed class GeminiTools(
         """)]
     public async Task<CallToolResult> GenerateImageAsync(
         [Description("생성/편집 지시문 (구체적일수록 좋음: 피사체, 스타일, 구도, 조명, 텍스트)")] string prompt,
-        [Description("편집/참조용 입력 이미지 경로 또는 URL")] string[]? input_images = null,
+        [Description("편집/참조용 입력 이미지 URL 또는 gemini://media/ URI")] string[]? input_images = null,
         [Description("가로세로 비율: 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, 2:3, 21:9 등")] string? aspect_ratio = null,
         [Description("해상도: 1K, 2K, 4K (지원 모델에서만)")] string? image_size = null,
         [Description("true 면 생성된 이미지를 응답에 포함 (토큰 사용 증가)")] bool return_image = false,
@@ -245,8 +245,8 @@ public sealed class GeminiTools(
         """)]
     public async Task<CallToolResult> GenerateVideoAsync(
         [Description("영상 지시문: 피사체, 동작, 카메라 움직임, 스타일, 대사/소리. 넣지 말아야 할 것도 문장으로 적습니다")] string prompt,
-        [Description("시작 프레임/참조용 이미지 경로 또는 URL")] string[]? input_images = null,
-        [Description("편집/연장할 영상 경로 또는 URL (업로드 영상은 10초 이하)")] string? input_video = null,
+        [Description("시작 프레임/참조용 이미지 URL 또는 gemini://media/ URI")] string[]? input_images = null,
+        [Description("편집/연장할 영상 URL 또는 gemini://media/ URI (10초 이하)")] string? input_video = null,
         [Description("이전 gemini_generate_video 결과의 interaction_id. 그 영상을 이어서 편집/연장합니다")] string? previous_interaction_id = null,
         [Description("작업 유형 힌트: text_to_video, image_to_video, reference_to_video, edit, extend (보통 생략)")] string? task = null,
         [Description("가로세로 비율: 16:9(기본) 또는 9:16")] string? aspect_ratio = null,

@@ -19,10 +19,9 @@ if (args.Contains("--help") || args.Contains("-h"))
           GEMINI_API_KEY          Gemini API 키 (필수, GOOGLE_API_KEY 도 인식)
           GEMINI_MCP_OUTPUT_DIR   모델 선택 저장 폴더   (기본: ~/gemini-mcp-output)
           GEMINI_MCP_S3_BUCKET    생성 미디어를 보관할 S3 호환 저장소 (이미지·음성·영상 도구에 필수)
-                                  GEMINI_MCP_S3_ENDPOINT, _REGION, _ACCESS_KEY, _SECRET_KEY, _PREFIX, _PATH_STYLE
+                                  GEMINI_MCP_S3_ENDPOINT, _REGION, _ACCESS_KEY, _SECRET_KEY, _PATH_STYLE
           GEMINI_MCP_PUBLIC_URL   미디어 다운로드 URL 기준 주소 (기본: 요청 Host)
           MCP_ALLOWED_ORIGINS     허용할 브라우저 Origin (쉼표 구분, 기본은 localhost 만)
-          GEMINI_MCP_PATH_MAPS    호스트=컨테이너 경로 매핑 (';' 구분, Docker 실행 시)
           ASPNETCORE_URLS         수신 주소 (기본: http://127.0.0.1:5100)
 
         모델은 환경 변수가 아니라 MCP 도구로 고릅니다: gemini_list_models 로 목록을 보고 gemini_select_model 로 선택
@@ -164,9 +163,7 @@ app.MapGet("/skill", () => Results.Text(SkillContent.Markdown, "text/markdown; c
 
 if (options.ApiKey is null)
     app.Logger.LogWarning("GEMINI_API_KEY 가 설정되지 않았습니다. 도구 호출 시 오류가 반환됩니다.");
-app.Logger.LogInformation("출력 폴더: {Dir}", options.OutputDirectory);
-if (options.Paths.IsEnabled)
-    app.Logger.LogInformation("경로 매핑: {Maps}", builder.Configuration["GEMINI_MCP_PATH_MAPS"]);
+app.Logger.LogInformation("모델 선택 저장 폴더: {Dir}", options.OutputDirectory);
 
 app.Run();
 return 0;

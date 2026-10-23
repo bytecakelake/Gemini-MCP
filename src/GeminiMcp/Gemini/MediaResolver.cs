@@ -4,7 +4,7 @@ using ModelContextProtocol;
 namespace GeminiMcp.Gemini;
 
 /// <summary>
-/// 로컬 경로 / http(s) URL / YouTube URL / Gemini 파일 URI / 생성 미디어 URI 를 Gemini "part" 로 변환합니다.
+/// http(s) URL / YouTube URL / Gemini 파일 URI / 생성 미디어 URI 를 Gemini "part" 로 변환합니다.
 /// 작은 파일은 inlineData(base64), 큰 파일은 Files API 업로드 후 fileData 로 보냅니다.
 /// </summary>
 public sealed class MediaResolver(GeminiClient gemini, HttpClient http, MediaStore store, GeminiOptions options)
@@ -15,7 +15,7 @@ public sealed class MediaResolver(GeminiClient gemini, HttpClient http, MediaSto
     {
         source = source.Trim().Trim('"');
         if (source.Length == 0)
-            throw new McpException("빈 파일 경로/URL 이 전달되었습니다.");
+            throw new McpException("빈 URL 이 전달되었습니다.");
 
         if (IsYouTube(source))
             return FileDataPart(source, mimeType: null);
@@ -30,7 +30,8 @@ public sealed class MediaResolver(GeminiClient gemini, HttpClient http, MediaSto
         if (Uri.TryCreate(source, UriKind.Absolute, out var uri) && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
             return await FromUrlAsync(uri, ct);
 
-        return await FromLocalFileAsync(source, ct);
+        throw new McpException(
+            $"지원하지 않는 입력입니다: {source} (http(s) URL, YouTube URL, gemini://media/ URI 만 받습니다. 로컬 파일 경로는 읽지 않습니다)");
     }
 
     /// <summary>
@@ -39,7 +40,7 @@ public sealed class MediaResolver(GeminiClient gemini, HttpClient http, MediaSto
     public async Task<JsonObject> ToInteractionContentAsync(string source, CancellationToken ct)
     {
         if (IsYouTube(source.Trim().Trim('"')))
-            throw new McpException("영상 생성 모델 입력으로 YouTube URL 은 지원하지 않습니다. 파일 경로나 직접 다운로드 URL 을 사용하세요.");
+            throw new McpException("영상 생성 모델 입력으로 YouTube URL 은 지원하지 않습니다. 직접 다운로드 URL 이나 gemini://media/ URI 를 사용하세요.");
 
         var part = await ToPartAsync(source, ct);
         var (mimeType, content) = part["inlineData"] is JsonObject inline
@@ -57,27 +58,6 @@ public sealed class MediaResolver(GeminiClient gemini, HttpClient http, MediaSto
         content["type"] = type;
         content["mime_type"] = mimeType;
         return content;
-    }
-
-    private async Task<JsonObject> FromLocalFileAsync(string path, CancellationToken ct)
-    {
-        var fullPath = Path.GetFullPath(options.Paths.ToLocal(Environment.ExpandEnvironmentVariables(path)));
-        var info = new FileInfo(fullPath);
-        if (!info.Exists)
-        {
-            var hint = options.Paths.IsEnabled
-                ? "컨테이너에서 실행 중이므로 GEMINI_MCP_PATH_MAPS 로 공유된 폴더 아래의 파일만 읽을 수 있습니다"
-                : "경로는 MCP 서버가 실행 중인 컴퓨터 기준입니다";
-            throw new McpException($"파일을 찾을 수 없습니다: {path} ({hint})");
-        }
-
-        var mimeType = MimeTypes.FromPath(fullPath);
-        if (info.Length <= options.InlineLimitBytes)
-            return InlinePart(await File.ReadAllBytesAsync(fullPath, ct), mimeType);
-
-        await using var stream = info.OpenRead();
-        var file = await gemini.UploadFileAsync(stream, info.Length, mimeType, info.Name, ct);
-        return FileDataPart(file["uri"]!.GetValue<string>(), file["mimeType"]?.GetValue<string>() ?? mimeType);
     }
 
     private async Task<JsonObject> FromMediaStoreAsync(string source, CancellationToken ct)

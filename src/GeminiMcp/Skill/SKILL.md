@@ -26,8 +26,8 @@ description: Gemini MCP 서버(gemini_* 도구) 사용법. Claude 가 직접 할
 
 ## 사용 규칙
 
-1. **파일 경로는 MCP 서버가 실행 중인 PC 기준의 절대 경로**를 사용합니다. (예: `C:\Users\me\Videos\demo.mp4`)
-   http(s) URL 과 YouTube URL 도 그대로 넘길 수 있습니다.
+1. **파일 입력은 http(s) URL, YouTube URL, 이 서버가 만든 `gemini://media/...` URI 만** 받습니다.
+   로컬 파일 경로(예: `C:\Users\me\video.mp4`)는 읽지 않으므로, 사용자 PC 의 파일은 서버가 내려받을 수 있는 URL 로 올린 뒤 넘기세요.
    15MB 를 넘는 파일은 서버가 자동으로 Gemini Files API 에 업로드합니다 (영상은 처리 대기로 수십 초 걸릴 수 있음).
 2. **모델 선택**: 모델은 환경 변수가 아니라 도구로 고릅니다. 용도(category)는 `text`, `pro`, `image`, `tts`, `video` 입니다.
    - `model` 을 생략하면 그 도구 용도에 선택된 모델을 씁니다 (처음에는 내장 기본값, 예: text = flash).
@@ -69,19 +69,19 @@ description: Gemini MCP 서버(gemini_* 도구) 사용법. Claude 가 직접 할
 
 **회의 녹음 전사**
 ```json
-{ "name": "gemini_analyze_media", "arguments": { "files": ["C:\\Recordings\\meeting.m4a"], "prompt": "화자를 구분해 전사하고, 마지막에 결정 사항과 액션 아이템을 정리" } }
+{ "name": "gemini_analyze_media", "arguments": { "files": ["https://example.com/recordings/meeting.m4a"], "prompt": "화자를 구분해 전사하고, 마지막에 결정 사항과 액션 아이템을 정리" } }
 ```
 
 **이미지 생성 / 편집**
 ```json
 { "name": "gemini_generate_image", "arguments": { "prompt": "미니멀한 플랫 스타일의 고양이 앱 아이콘, 파스텔 블루 배경", "aspect_ratio": "1:1" } }
-{ "name": "gemini_generate_image", "arguments": { "prompt": "배경을 해질녘 해변으로 바꿔줘", "input_images": ["C:\\Work\\photo.jpg"] } }
+{ "name": "gemini_generate_image", "arguments": { "prompt": "배경을 해질녘 해변으로 바꿔줘", "input_images": ["https://example.com/photo.jpg"] } }
 ```
 
 **영상 생성 / 이어서 편집**
 ```json
 { "name": "gemini_generate_video", "arguments": { "prompt": "비 오는 밤 네온 거리를 걷는 고양이, 낮은 앵글로 천천히 따라가는 카메라, 빗소리", "aspect_ratio": "16:9" } }
-{ "name": "gemini_generate_video", "arguments": { "prompt": "이 사진 속 인물이 손을 흔들며 미소 짓는 장면", "input_images": ["C:\\Work\\portrait.jpg"], "aspect_ratio": "9:16" } }
+{ "name": "gemini_generate_video", "arguments": { "prompt": "이 사진 속 인물이 손을 흔들며 미소 짓는 장면", "input_images": ["gemini://media/<이름>.png"], "aspect_ratio": "9:16" } }
 { "name": "gemini_generate_video", "arguments": { "prompt": "마지막에 우산을 펼치는 장면으로 연장", "previous_interaction_id": "v1_..." } }
 ```
 
@@ -99,7 +99,7 @@ description: Gemini MCP 서버(gemini_* 도구) 사용법. Claude 가 직접 할
 **세컨드 오피니언 / 구조화 출력**
 ```json
 { "name": "gemini_ask", "arguments": { "prompt": "다음 코드의 동시성 버그를 찾아줘: ...", "model": "pro" } }
-{ "name": "gemini_ask", "arguments": { "prompt": "이 PDF 의 계약 당사자와 금액을 추출", "files": ["C:\\Docs\\contract.pdf"], "json_schema": "{\"type\":\"object\",\"properties\":{\"parties\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"amount\":{\"type\":\"string\"}}}" } }
+{ "name": "gemini_ask", "arguments": { "prompt": "이 PDF 의 계약 당사자와 금액을 추출", "files": ["https://example.com/docs/contract.pdf"], "json_schema": "{\"type\":\"object\",\"properties\":{\"parties\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"amount\":{\"type\":\"string\"}}}" } }
 ```
 
 ## 오류 대응
@@ -107,4 +107,4 @@ description: Gemini MCP 서버(gemini_* 도구) 사용법. Claude 가 직접 할
 - `GEMINI_API_KEY 가 설정되지 않았습니다` → 서버 실행 환경에 `GEMINI_API_KEY` 환경 변수를 설정 후 재시작.
 - `Gemini API 오류 (404 ...)` → 모델 이름 오류 또는 종료된 모델. `gemini_list_models` 로 확인하고 필요하면 `gemini_select_model` 로 교체.
 - `Gemini API 오류 (429 ...)` → 할당량 초과. 잠시 후 재시도하거나 `flash` 모델 사용.
-- `파일을 찾을 수 없습니다` → 경로가 서버 PC 기준 절대 경로인지 확인.
+- `지원하지 않는 입력입니다` → 로컬 파일 경로를 넘긴 경우. 서버가 내려받을 수 있는 http(s) URL 이나 `gemini://media/...` URI 로 바꾸세요.

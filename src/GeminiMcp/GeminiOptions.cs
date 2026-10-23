@@ -13,7 +13,6 @@ public sealed class GeminiOptions
     public required string OutputDirectory { get; init; }
     public required long InlineLimitBytes { get; init; }
     public required TimeSpan RequestTimeout { get; init; }
-    public required PathMapper Paths { get; init; }
     /// <summary>생성 미디어를 보관할 S3 호환 저장소. null 이면 미디어 생성 도구가 오류를 반환합니다.</summary>
     public required S3Settings? S3 { get; init; }
     /// <summary>미디어 다운로드 URL 의 기준 주소 (예: https://mcp.example.com). 없으면 요청의 Host 로 만듭니다.</summary>
@@ -43,7 +42,6 @@ public sealed class GeminiOptions
             InlineLimitBytes = long.TryParse(Get("GEMINI_INLINE_LIMIT_BYTES"), out var limit) ? limit : 15 * 1024 * 1024,
             RequestTimeout = TimeSpan.FromSeconds(
                 int.TryParse(Get("GEMINI_TIMEOUT_SECONDS"), out var seconds) ? seconds : 600),
-            Paths = new PathMapper(Get("GEMINI_MCP_PATH_MAPS")),
             S3 = ReadS3(Get),
             PublicUrl = Get("GEMINI_MCP_PUBLIC_URL")?.TrimEnd('/'),
         };
@@ -69,15 +67,11 @@ public sealed class GeminiOptions
         var secretKey = Get("GEMINI_MCP_S3_SECRET_KEY", "AWS_SECRET_ACCESS_KEY")
             ?? throw new FormatException("GEMINI_MCP_S3_BUCKET 을 쓰려면 GEMINI_MCP_S3_SECRET_KEY 가 필요합니다.");
 
-        var prefix = (Get("GEMINI_MCP_S3_PREFIX") ?? "gemini-mcp-media/").TrimStart('/');
-        if (prefix.Length > 0 && !prefix.EndsWith('/'))
-            prefix += "/";
-
         // 사용자 지정 엔드포인트(SeaweedFS, MinIO 등)는 보통 path-style 만 지원합니다.
         var pathStyle = Get("GEMINI_MCP_S3_PATH_STYLE") is { } style
             ? style.Equals("true", StringComparison.OrdinalIgnoreCase) || style == "1"
             : endpointText is not null;
 
-        return new S3Settings(endpoint, bucket, region, accessKey, secretKey, prefix, pathStyle);
+        return new S3Settings(endpoint, bucket, region, accessKey, secretKey, pathStyle);
     }
 }

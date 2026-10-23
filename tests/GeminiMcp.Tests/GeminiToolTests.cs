@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using GeminiMcp.Tests.Infrastructure;
@@ -225,15 +226,13 @@ public sealed class GeminiToolTests(DefaultServer server) : IAsyncLifetime
     public async Task TextToSpeech_ReturnsWavLink_AndCanBeTranscribed()
     {
         Assert.SkipUnless(server.HasMediaStore, GeminiServer.NoMediaStoreReason);
-        var before = Directory.GetFiles(server.OutputDirectory).Length;
         var result = await _client.CallOkAsync("gemini_text_to_speech", new()
         {
             ["text"] = "Hello from the Gemini MCP server. Verification complete.",
             ["voice"] = "Kore",
         });
 
-        // 출력 폴더에는 아무것도 쓰지 않고 S3 에 보관한 뒤 ResourceLink 만 돌려줍니다.
-        Assert.Equal(before, Directory.GetFiles(server.OutputDirectory).Length);
+        // S3 에 보관한 뒤 ResourceLink 만 돌려줍니다.
         var link = Assert.Single(result.Content.OfType<ResourceLinkBlock>());
         Assert.Equal("audio/wav", link.MimeType);
         Assert.Contains(link.Uri, result.Text());
@@ -276,28 +275,42 @@ public sealed class GeminiToolTests(DefaultServer server) : IAsyncLifetime
     };
 }
 
-/// <summary>인라인 한도를 넘는 파일이 Gemini Files API 업로드 경로로 처리되는지 검증합니다.</summary>
+/// <summary>인라인 한도를 넘는 URL 파일이 Gemini Files API 업로드 경로로 처리되는지 검증합니다.</summary>
 [Trait("Category", "Live")]
 public sealed class FilesApiUploadTests(UploadServer server) : IClassFixture<UploadServer>
 {
     [Fact]
-    public async Task LargeFile_IsUploadedViaFilesApi()
+    public async Task LargeUrlFile_IsUploadedViaFilesApi()
     {
         Assert.SkipWhen(server.ApiKey is null, "GEMINI_API_KEY is not set.");
         var ct = TestContext.Current.CancellationToken;
 
-        var file = Path.Combine(server.OutputDirectory, "notes.txt");
         var filler = string.Concat(Enumerable.Repeat("This line is filler text for the upload test.\n", 100));
-        await File.WriteAllTextAsync(file, filler + "The secret code word is PELICAN-42.\n", ct);
-        Assert.True(new FileInfo(file).Length > 1024);
+        var body = Encoding.UTF8.GetBytes(filler + "The secret code word is PELICAN-42.\n");
+        Assert.True(body.Length > 1024);
+
+        // 서버(로컬 프로세스)가 내려받을 수 있게 테스트 프로세스에서 파일을 HTTP 로 제공합니다.
+        using var listener = new HttpListener();
+        var prefix = $"http://localhost:{GeminiServer.GetFreePort()}/";
+        listener.Prefixes.Add(prefix);
+        listener.Start();
+        var serving = Task.Run(async () =>
+        {
+            var context = await listener.GetContextAsync();
+            context.Response.ContentType = "text/plain";
+            context.Response.ContentLength64 = body.Length;
+            await context.Response.OutputStream.WriteAsync(body, ct);
+            context.Response.Close();
+        }, ct);
 
         await using var client = await server.ConnectAsync(ct);
         var text = (await client.CallOkAsync("gemini_analyze_media", new()
         {
-            ["files"] = new[] { file },
+            ["files"] = new[] { prefix + "notes.txt" },
             ["prompt"] = "What is the secret code word in this file? Answer with the code word only.",
         })).Text();
 
+        await serving;
         Assert.Contains("PELICAN-42", text);
         Assert.Contains("Files API upload notes.txt", server.Log);
     }

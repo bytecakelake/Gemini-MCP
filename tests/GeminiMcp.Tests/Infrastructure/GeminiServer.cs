@@ -14,7 +14,6 @@ namespace GeminiMcp.Tests.Infrastructure;
 /// 외부 서버 모드: GEMINI_MCP_URL 을 지정하면 프로세스를 띄우지 않고 이미 실행 중인 서버(예: Docker 컨테이너)를 검증합니다.
 ///   GEMINI_MCP_URL              서버 주소 (예: http://127.0.0.1:5100)
 ///   GEMINI_MCP_API_KEY          대시보드에서 발급한 API 키 (APISIX 게이트웨이를 거칠 때 필수)
-///   GEMINI_MCP_TEST_OUTPUT_DIR  서버 출력 폴더의 호스트 경로 (Docker: HOST_SHARE_DIR\gemini-mcp-output)
 /// </summary>
 public abstract class GeminiServer : IAsyncLifetime
 {
@@ -26,15 +25,7 @@ public abstract class GeminiServer : IAsyncLifetime
     {
         _externalUrl = AllowExternal ? Environment.GetEnvironmentVariable("GEMINI_MCP_URL") : null;
         if (IsExternal)
-        {
             GatewayKey = NullIfEmpty(Environment.GetEnvironmentVariable("GEMINI_MCP_API_KEY"));
-            OutputDirectory = NullIfEmpty(Environment.GetEnvironmentVariable("GEMINI_MCP_TEST_OUTPUT_DIR"))
-                ?? throw new InvalidOperationException("GEMINI_MCP_TEST_OUTPUT_DIR is required with GEMINI_MCP_URL.");
-        }
-        else
-        {
-            OutputDirectory = Path.Combine(Path.GetTempPath(), "gemini-mcp-tests", Guid.NewGuid().ToString("N"));
-        }
     }
 
     public bool IsExternal => _externalUrl is not null;
@@ -42,8 +33,8 @@ public abstract class GeminiServer : IAsyncLifetime
     public string? GatewayKey { get; }
     public Uri BaseUri { get; private set; } = null!;
     public Uri McpEndpoint => new(BaseUri, "/mcp");
-    /// <summary>서버가 생성 파일을 저장하는 폴더 (테스트 PC 기준 경로).</summary>
-    public string OutputDirectory { get; }
+    /// <summary>로컬 프로세스가 모델 선택을 저장하는 폴더. 서버마다 새로 만들어 개발자의 선택과 섞이지 않게 합니다.</summary>
+    public string OutputDirectory { get; } = Path.Combine(Path.GetTempPath(), "gemini-mcp-tests", Guid.NewGuid().ToString("N"));
     public string? ApiKey { get; } = ResolveApiKey();
 
     /// <summary>
@@ -198,7 +189,7 @@ public abstract class GeminiServer : IAsyncLifetime
         return string.IsNullOrEmpty(key) ? null : key;
     }
 
-    private static int GetFreePort()
+    internal static int GetFreePort()
     {
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();

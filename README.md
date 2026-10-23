@@ -42,7 +42,7 @@ dashboard ─(Admin API)─▶ APISIX ─▶ etcd (라우트·API 키)
 
 모델은 환경 변수로 정하지 않고 에이전트가 직접 고릅니다. `gemini_list_models` 가 API 키로 쓸 수 있는 모델을 용도별로 보여주고(★ = 현재 선택),
 `gemini_select_model { category, model }` 로 용도별 기본 모델을 바꿉니다(`model: "default"` 로 초기화). 선택은 서버 전역이며
-출력 폴더의 `.gemini-mcp-models.json` 에 저장되어 재시작 후에도 유지됩니다. 한 번만 다른 모델을 쓰려면 각 도구의 `model` 인수를 넘기면 됩니다.
+`GEMINI_MCP_OUTPUT_DIR`(Docker 는 `mcp-data` 볼륨)의 `.gemini-mcp-models.json` 에 저장되어 재시작 후에도 유지됩니다. 한 번만 다른 모델을 쓰려면 각 도구의 `model` 인수를 넘기면 됩니다.
 
 - **최신 모델 반영**: 목록은 `models.list` 에서 받아 1시간(3600초) 캐시합니다. `refresh: true` 로 즉시 새로 받을 수 있고,
   `gemini_select_model` 은 캐시에 없는 이름이면 한 번 새로 받아 다시 확인합니다.
@@ -123,7 +123,7 @@ docker compose 를 직접 쓰는 경우: `docker compose -f docker/docker-compos
 
 | 명령 | 동작 |
 |---|---|
-| `setup` | `.env` 생성 (`-ShareDir`/`--share-dir`, `-Bind`/`--bind`, `-Port`/`--port`, `-Domain`/`--domain`, `-TlsCert`·`-TlsKey`/`--tls-cert`·`--tls-key`, `-BundledS3`/`--bundled-s3`, `-Force`/`--force`) |
+| `setup` | `.env` 생성 (`-Bind`/`--bind`, `-Port`/`--port`, `-Domain`/`--domain`, `-TlsCert`·`-TlsKey`/`--tls-cert`·`--tls-key`, `-BundledS3`/`--bundled-s3`, `-Force`/`--force`) |
 | `up` | 빌드 + 시작, healthcheck 통과까지 대기 |
 | `down` / `restart` / `logs` / `status` | 중지·삭제 / 재시작 / 로그 / 상태와 연결 정보 |
 | `rebuild` | 캐시 없이 베이스 이미지부터 다시 빌드 |
@@ -180,8 +180,8 @@ docker compose 를 직접 쓰는 경우: `docker compose -f docker/docker-compos
 ### 기타 설정
 
 - **Gemini API 키**: `.env` 의 `GEMINI_API_KEY` 를 비워 두면 셸(Windows 는 사용자 환경 변수 포함)의 값을 씁니다. 키를 파일에 평문으로 저장하지 않으려면 비워 두세요.
-- **파일 공유**: 컨테이너는 호스트 파일을 볼 수 없으므로 `HOST_SHARE_DIR`(기본: 사용자 홈)을 `/share` 로 마운트하고 경로를 자동 변환합니다.
-  Claude 가 `C:\Users\me\video.mp4` 를 넘기면 서버는 `/share/video.mp4` 를 읽습니다. 공유 폴더 밖의 파일은 읽을 수 없습니다.
+- **파일 입력**: 도구의 `files`·`input_images`·`input_video` 는 http(s) URL, YouTube URL, `gemini://media/...` URI 만 받습니다.
+  로컬 파일 경로는 서버 단독 실행에서도 읽지 않으며, 호스트 폴더를 컨테이너에 마운트하지 않습니다.
 - **생성 미디어**: 이미지·음성·영상은 모두 S3 호환 저장소에 보관하고, 응답에는 바이트 대신 `gemini://media/<이름>` ResourceLink 를 돌려줍니다.
   클라이언트는 MCP `resources/read` 또는 `GET /mcp/media/<이름>`(MCP 와 같은 API 키)으로 받아 갑니다.
   객체마다 메타데이터(`x-amz-meta-tool`, `-model`, `-prompt`(최대 약 1.2KB, 퍼센트 인코딩), `-consumer`(요청한 API 키), `-interaction-id`)를 함께 저장합니다.
@@ -192,12 +192,16 @@ docker compose 를 직접 쓰는 경우: `docker compose -f docker/docker-compos
   | 외부 S3 (AWS S3, Cloudflare R2, Backblaze B2, MinIO 등) | `.env` 에 `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_ENDPOINT`(AWS 면 비우고 `S3_REGION`) 설정. `S3_BUCKET` 이 비어 있으면 이미지·음성·영상 도구만 오류를 반환합니다 |
   | 내장 S3 (선택, SeaweedFS 컨테이너) | `docker compose -f docker-compose.yml -f docker-compose.s3.yml up -d` 처럼 `docker-compose.s3.yml` 을 겹칩니다. `setup -BundledS3` / `setup --bundled-s3` 는 `.env` 에 `COMPOSE_FILE=docker-compose.yml:docker-compose.s3.yml` 과 무작위 `S3_SECRET_KEY` 를 넣어 `-f` 없이도 겹치게 합니다. 버킷과 계정은 첫 실행 때 자동 생성되고 데이터는 `s3-data` 볼륨에 남습니다 |
 
-  버킷이 없으면 MCP 서버가 시작할 때 만듭니다. 외부 S3 키에는 해당 버킷(접두사 `S3_PREFIX`, 기본 `gemini-mcp-media/`)의 읽기·쓰기·목록·삭제 권한이 필요합니다.
+  버킷이 없으면 MCP 서버가 시작할 때 만듭니다. 외부 S3 키에는 해당 버킷의 읽기·쓰기·목록·삭제 권한이 필요합니다.
+  미디어는 접두사 없이 버킷 루트에 저장하므로 전용 버킷을 쓰세요(미디어 이름 형식이 아닌 객체는 목록에서 무시합니다).
   S3 접속 정보는 MCP 서버만 갖고, 대시보드는 MCP 서버의 내부 API(`/internal/media`, `backend` 네트워크, APISIX 가 라우팅하지 않음)로 목록 조회·삭제를 요청합니다.
   APISIX 는 요청한 키의 컨슈머 이름을 `X-Mcp-Consumer` 헤더로 넘기며(클라이언트가 보낸 값은 덮어씀), 대시보드가 이를 키 이름으로 바꿔 보여 줍니다.
   이전 버전의 `.env` 에 `COMPOSE_PROFILES=s3` 가 있으면 `docker.ps1`/`docker.sh` 가 실행될 때 `COMPOSE_FILE` 로 바꿔 내장 S3 를 계속 씁니다.
-  예전 버전이 공유 폴더에 남긴 `<OUTPUT_SUBDIR>/.media` 는 더 이상 쓰지 않으니 지워도 됩니다.
-- **데이터 볼륨**: `etcd-data`(라우트·API 키), `loki-data`(로그), `dashboard-data`(관리자 비밀번호 해시), `caddy-data`(인증서), `s3-data`(내장 S3).
+- **이전 버전에서 올릴 때**: 공유 폴더를 더 이상 쓰지 않습니다. 호스트에 남은 `<HOST_SHARE_DIR>/<OUTPUT_SUBDIR>`(기본 `~/gemini-mcp-output`)는 지워도 되고,
+  `.env` 의 `HOST_SHARE_DIR`, `OUTPUT_SUBDIR`, `DOCKER_UID`, `DOCKER_GID` 는 무시됩니다. 모델 선택은 새 `mcp-data` 볼륨으로 옮겨지지 않으므로 필요하면 다시 고르세요.
+  S3 키 접두사(`S3_PREFIX`, 기본 `gemini-mcp-media/`)도 없어졌습니다. 이전에 저장한 미디어는 그 접두사 아래에 남아 보이지 않으니,
+  계속 쓰려면 버킷 루트로 옮기세요(예: `aws s3 mv s3://<버킷>/gemini-mcp-media/ s3://<버킷>/ --recursive`).
+- **데이터 볼륨**: `mcp-data`(모델 선택), `etcd-data`(라우트·API 키), `loki-data`(로그), `dashboard-data`(관리자 비밀번호 해시), `caddy-data`(인증서), `s3-data`(내장 S3).
 - 설정 항목 전체는 [docker/.env.example](docker/.env.example) 을 참고하세요. 설정 우선순위는 셸 환경 변수 > `.env` 입니다 (docker compose 와 동일).
 
 ## MCP 서버 단독 실행 (개발용)
@@ -222,13 +226,11 @@ $env:GEMINI_MCP_S3_ACCESS_KEY = "dev"; $env:GEMINI_MCP_S3_SECRET_KEY = "devsecre
 | `GEMINI_MCP_S3_ENDPOINT` | `https://s3.<region>.amazonaws.com` | S3 호환 서버 주소 (SeaweedFS, R2, MinIO 등) |
 | `GEMINI_MCP_S3_REGION` | `us-east-1` | 서명 리전 (`AWS_REGION` 도 인식) |
 | `GEMINI_MCP_S3_ACCESS_KEY` / `_SECRET_KEY` | (S3 사용 시 필수) | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` 도 인식 |
-| `GEMINI_MCP_S3_PREFIX` | `gemini-mcp-media/` | 버킷 안 키 접두사 |
 | `GEMINI_MCP_S3_PATH_STYLE` | 엔드포인트 지정 시 `true` | path-style 주소 사용 여부 |
 | `GEMINI_MCP_PUBLIC_URL` | (요청 Host) | 미디어 다운로드 URL 의 기준 주소 |
 | `GEMINI_INLINE_LIMIT_BYTES` | `15728640` | 이보다 큰 파일은 Files API 로 업로드 |
 | `MCP_ALLOWED_ORIGINS` | (localhost 만) | 허용할 브라우저 Origin, 쉼표 구분 |
 | `ASPNETCORE_URLS` / `--urls` | `http://127.0.0.1:5100` | 수신 주소 |
-| `GEMINI_MCP_PATH_MAPS` | (없음) | `호스트경로=서버경로` 매핑 (`;` 구분). Docker 에서 사용 |
 
 MCP 서버 자체는 인증하지 않습니다. 루프백 또는 내부 네트워크에만 노출하고, 외부 접속은 APISIX 를 거치게 하세요.
 
@@ -277,20 +279,18 @@ dotnet test --project tests/GeminiMcp.Tests --filter-not-trait "Category=Live" #
 | `HttpEndpointTests` | `/health`, `/skill`, 외부 Origin 403, localhost Origin 허용, (APISIX 경유 시) 키 없음·잘못된 키 401 |
 | `McpProtocolTests` | initialize(서버 정보·instructions·capabilities), 구버전 프로토콜(2025-03-26/06-18/11-25) 협상, 도구 목록·스키마, 스킬 프롬프트·리소스, 도구 오류(isError) |
 | `GeminiToolTests` (Live) | 9개 도구 실호출: 검색 출처, JSON Schema, Python 실행, 이미지 생성→재인식, TTS→받아쓰기, YouTube |
-| `FilesApiUploadTests` (Live) | 인라인 한도를 넘는 파일이 Files API 업로드 경로로 처리되는지 |
+| `FilesApiUploadTests` (Live) | 인라인 한도를 넘는 URL 파일이 Files API 업로드 경로로 처리되는지 |
 | `MediaStoreTests` | 미디어 리소스 템플릿, 경로 탈출 차단, 내부 API Origin 거부·404, (Live) 음성 생성→최신순 목록·메타데이터(한글 프롬프트, API 키)·통계→관리자 삭제 후 조회·재사용 실패. S3 는 `GEMINI_MCP_TEST_S3_*` 가 있을 때만 |
 | `NoMediaStoreTests` | S3 가 없으면 미디어 도구가 Gemini 호출 전에 오류, 다운로드·내부 API 503 |
 
 - `GEMINI_API_KEY` 가 없으면 Live 테스트는 건너뜁니다 (Windows 에서는 사용자 환경 변수도 읽음).
 - 다른 실행 파일을 검증하려면 `GEMINI_MCP_EXE` 환경 변수로 경로를 지정합니다.
 - **실행 중인 배포(APISIX 경유) 검증**: `GEMINI_MCP_URL` 을 지정하면 프로세스를 띄우지 않고 그 서버를 테스트합니다.
-  이미지·음성 테스트가 호스트 경로로 파일을 주고받으므로 경로 매핑까지 검증됩니다.
   (`FilesApiUploadTests` 는 서버 설정을 바꿔야 하므로 항상 로컬 AOT 바이너리로 실행합니다.)
 
   ```powershell
   $env:GEMINI_MCP_URL = "https://127.0.0.1:5100"   # Caddy 루트 인증서를 Windows 사용자 저장소에 신뢰시켜야 합니다 (cert 명령 안내 참고)
   $env:GEMINI_MCP_API_KEY = "<대시보드에서 발급한 키>"
-  $env:GEMINI_MCP_TEST_OUTPUT_DIR = "$HOME\gemini-mcp-output"   # HOST_SHARE_DIR\OUTPUT_SUBDIR
   dotnet test --project tests/GeminiMcp.Tests
   ```
 - **S3 저장소**: 이미지·음성·영상 테스트에는 S3 가 필요합니다. 일회용 SeaweedFS 를 띄우고 주소와 키를 넘기면
@@ -311,9 +311,7 @@ dotnet test --project tests/GeminiMcp.Tests --filter-not-trait "Category=Live" #
 src/GeminiMcp/                MCP 서버 (.NET 10 Native AOT)
   Program.cs                  호스트, MCP 등록, Origin 검사, /skill·/health
   GeminiOptions.cs            설정(환경 변수)
-  PathMapper.cs               호스트↔컨테이너 경로 변환
   Gemini/                     Gemini REST(v1beta) 클라이언트, 미디어 변환, 응답 파싱
-  Gemini/MediaStore.cs        생성 미디어 보관(TTL)·리소스·정리, 로컬 디스크 저장소
   Gemini/MediaStore.cs        생성 미디어 보관(S3, 메타데이터)·리소스·목록/통계/삭제
   Gemini/S3MediaBackend.cs    S3 호환 저장소 (Signature V4 직접 구현, AOT)
   Tools/GeminiTools.cs        MCP 도구 9종
